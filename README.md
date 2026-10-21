@@ -4,6 +4,8 @@
 > 文件名 + 页码**，并且整条链路（加载 → 切分 → 向量化 → 混合检索 → 重排 → 生成）都有
 > **可复现的自检与离线评估**。
 
+前端工程：[`rag-frontend`](https://github.com/yaodengying/rag-frontend)（React 19 + TypeScript + antd 6）
+
 <p>
 <img alt="python" src="https://img.shields.io/badge/Python-3.14-3776AB?logo=python&logoColor=white">
 <img alt="fastapi" src="https://img.shields.io/badge/FastAPI-0.143-009688?logo=fastapi&logoColor=white">
