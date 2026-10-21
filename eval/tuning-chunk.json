@@ -1,0 +1,57 @@
+{
+  "config": {
+    "retrieve_top_k": 8,
+    "rerank_top_n": 4,
+    "rerank_min_score": 0.0,
+    "chunk_size": 300,
+    "chunk_overlap": 50,
+    "hybrid_weights": [
+      0.5,
+      0.5
+    ]
+  },
+  "chunk": {
+    "grid": [
+      {
+        "chunk_size": 150,
+        "chunk_overlap": 25,
+        "chunks": 96,
+        "avg_chars": 83.7,
+        "hit": 1.0,
+        "mrr": 1.0,
+        "top1_cos": 0.695,
+        "n": 24
+      },
+      {
+        "chunk_size": 300,
+        "chunk_overlap": 50,
+        "chunks": 32,
+        "avg_chars": 251.0,
+        "hit": 1.0,
+        "mrr": 1.0,
+        "top1_cos": 0.5681,
+        "n": 24
+      },
+      {
+        "chunk_size": 500,
+        "chunk_overlap": 83,
+        "chunks": 24,
+        "avg_chars": 334.7,
+        "hit": 1.0,
+        "mrr": 0.8194,
+        "top1_cos": 0.5251,
+        "n": 24
+      }
+    ],
+    "best": {
+      "chunk_size": 150,
+      "chunk_overlap": 25,
+      "chunks": 96,
+      "avg_chars": 83.7,
+      "hit": 1.0,
+      "mrr": 1.0,
+      "top1_cos": 0.695,
+      "n": 24
+    }
+  }
+}

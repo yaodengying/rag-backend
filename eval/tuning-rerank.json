@@ -1,0 +1,119 @@
+{
+  "config": {
+    "retrieve_top_k": 8,
+    "rerank_top_n": 4,
+    "rerank_min_score": 0.0,
+    "chunk_size": 300,
+    "chunk_overlap": 50,
+    "hybrid_weights": [
+      0.5,
+      0.5
+    ]
+  },
+  "rerank": {
+    "grid": [
+      {
+        "rerank_k": 2,
+        "min_score": -10.0,
+        "hit": 1.0,
+        "mrr": 0.9792,
+        "top1_cos": 0.5681,
+        "n": 24
+      },
+      {
+        "rerank_k": 2,
+        "min_score": 0.0,
+        "hit": 1.0,
+        "mrr": 0.9792,
+        "top1_cos": 0.5681,
+        "n": 24
+      },
+      {
+        "rerank_k": 2,
+        "min_score": 2.0,
+        "hit": 1.0,
+        "mrr": 0.9792,
+        "top1_cos": 0.5681,
+        "n": 24
+      },
+      {
+        "rerank_k": 3,
+        "min_score": -10.0,
+        "hit": 1.0,
+        "mrr": 0.9792,
+        "top1_cos": 0.5681,
+        "n": 24
+      },
+      {
+        "rerank_k": 3,
+        "min_score": 0.0,
+        "hit": 1.0,
+        "mrr": 0.9792,
+        "top1_cos": 0.5681,
+        "n": 24
+      },
+      {
+        "rerank_k": 3,
+        "min_score": 2.0,
+        "hit": 1.0,
+        "mrr": 0.9792,
+        "top1_cos": 0.5681,
+        "n": 24
+      },
+      {
+        "rerank_k": 4,
+        "min_score": -10.0,
+        "hit": 1.0,
+        "mrr": 0.9792,
+        "top1_cos": 0.5681,
+        "n": 24
+      },
+      {
+        "rerank_k": 4,
+        "min_score": 0.0,
+        "hit": 1.0,
+        "mrr": 0.9792,
+        "top1_cos": 0.5681,
+        "n": 24
+      },
+      {
+        "rerank_k": 4,
+        "min_score": 2.0,
+        "hit": 1.0,
+        "mrr": 0.9792,
+        "top1_cos": 0.5681,
+        "n": 24
+      },
+      {
+        "rerank_k": 6,
+        "min_score": -10.0,
+        "hit": 1.0,
+        "mrr": 0.9792,
+        "top1_cos": 0.5681,
+        "n": 24
+      },
+      {
+        "rerank_k": 6,
+        "min_score": 0.0,
+        "hit": 1.0,
+        "mrr": 0.9792,
+        "top1_cos": 0.5681,
+        "n": 24
+      },
+      {
+        "rerank_k": 6,
+        "min_score": 2.0,
+        "hit": 1.0,
+        "mrr": 0.9792,
+        "top1_cos": 0.5681,
+        "n": 24
+      }
+    ],
+    "no_rerank": {
+      "hit": 1.0,
+      "mrr": 0.9792,
+      "top1_cos": 0.5681,
+      "n": 24
+    }
+  }
+}

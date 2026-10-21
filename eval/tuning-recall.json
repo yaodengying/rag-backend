@@ -1,0 +1,206 @@
+{
+  "config": {
+    "retrieve_top_k": 8,
+    "rerank_top_n": 4,
+    "rerank_min_score": 0.0,
+    "chunk_size": 300,
+    "chunk_overlap": 50,
+    "hybrid_weights": [
+      0.5,
+      0.5
+    ]
+  },
+  "recall": {
+    "grid": [
+      {
+        "top_k": 6,
+        "vector_weight": 0.5,
+        "bm25_weight": 0.5,
+        "hit": 1.0,
+        "mrr": 0.9792,
+        "top1_cos": 0.5687,
+        "n": 24
+      },
+      {
+        "top_k": 6,
+        "vector_weight": 0.3,
+        "bm25_weight": 0.7,
+        "hit": 1.0,
+        "mrr": 0.9792,
+        "top1_cos": 0.5675,
+        "n": 24
+      },
+      {
+        "top_k": 8,
+        "vector_weight": 0.5,
+        "bm25_weight": 0.5,
+        "hit": 1.0,
+        "mrr": 0.9792,
+        "top1_cos": 0.5687,
+        "n": 24
+      },
+      {
+        "top_k": 8,
+        "vector_weight": 0.3,
+        "bm25_weight": 0.7,
+        "hit": 1.0,
+        "mrr": 0.9792,
+        "top1_cos": 0.5675,
+        "n": 24
+      },
+      {
+        "top_k": 12,
+        "vector_weight": 0.5,
+        "bm25_weight": 0.5,
+        "hit": 1.0,
+        "mrr": 0.9792,
+        "top1_cos": 0.5687,
+        "n": 24
+      },
+      {
+        "top_k": 12,
+        "vector_weight": 0.3,
+        "bm25_weight": 0.7,
+        "hit": 1.0,
+        "mrr": 0.9792,
+        "top1_cos": 0.5675,
+        "n": 24
+      },
+      {
+        "top_k": 6,
+        "vector_weight": 0.7,
+        "bm25_weight": 0.3,
+        "hit": 1.0,
+        "mrr": 0.9583,
+        "top1_cos": 0.5688,
+        "n": 24
+      },
+      {
+        "top_k": 8,
+        "vector_weight": 0.7,
+        "bm25_weight": 0.3,
+        "hit": 1.0,
+        "mrr": 0.9583,
+        "top1_cos": 0.5688,
+        "n": 24
+      },
+      {
+        "top_k": 4,
+        "vector_weight": 0.5,
+        "bm25_weight": 0.5,
+        "hit": 0.9583,
+        "mrr": 0.9583,
+        "top1_cos": 0.5687,
+        "n": 24
+      },
+      {
+        "top_k": 4,
+        "vector_weight": 0.3,
+        "bm25_weight": 0.7,
+        "hit": 1.0,
+        "mrr": 0.9514,
+        "top1_cos": 0.5682,
+        "n": 24
+      },
+      {
+        "top_k": 12,
+        "vector_weight": 0.7,
+        "bm25_weight": 0.3,
+        "hit": 1.0,
+        "mrr": 0.9514,
+        "top1_cos": 0.5688,
+        "n": 24
+      },
+      {
+        "top_k": 2,
+        "vector_weight": 0.3,
+        "bm25_weight": 0.7,
+        "hit": 1.0,
+        "mrr": 0.9375,
+        "top1_cos": 0.5702,
+        "n": 24
+      },
+      {
+        "top_k": 4,
+        "vector_weight": 0.7,
+        "bm25_weight": 0.3,
+        "hit": 0.9583,
+        "mrr": 0.9375,
+        "top1_cos": 0.5688,
+        "n": 24
+      },
+      {
+        "top_k": 2,
+        "vector_weight": 0.5,
+        "bm25_weight": 0.5,
+        "hit": 0.9167,
+        "mrr": 0.9167,
+        "top1_cos": 0.5705,
+        "n": 24
+      },
+      {
+        "top_k": 2,
+        "vector_weight": 0.7,
+        "bm25_weight": 0.3,
+        "hit": 0.875,
+        "mrr": 0.8542,
+        "top1_cos": 0.5704,
+        "n": 24
+      },
+      {
+        "top_k": 4,
+        "vector_weight": 1.0,
+        "bm25_weight": 0.0,
+        "hit": 0.9583,
+        "mrr": 0.8368,
+        "top1_cos": 0.5707,
+        "n": 24
+      },
+      {
+        "top_k": 6,
+        "vector_weight": 1.0,
+        "bm25_weight": 0.0,
+        "hit": 0.9583,
+        "mrr": 0.8368,
+        "top1_cos": 0.5707,
+        "n": 24
+      },
+      {
+        "top_k": 8,
+        "vector_weight": 1.0,
+        "bm25_weight": 0.0,
+        "hit": 0.9583,
+        "mrr": 0.8368,
+        "top1_cos": 0.5707,
+        "n": 24
+      },
+      {
+        "top_k": 12,
+        "vector_weight": 1.0,
+        "bm25_weight": 0.0,
+        "hit": 0.9583,
+        "mrr": 0.8368,
+        "top1_cos": 0.5707,
+        "n": 24
+      },
+      {
+        "top_k": 2,
+        "vector_weight": 1.0,
+        "bm25_weight": 0.0,
+        "hit": 0.875,
+        "mrr": 0.8125,
+        "top1_cos": 0.5707,
+        "n": 24
+      }
+    ],
+    "best": {
+      "top_k": 6,
+      "vector_weight": 0.5,
+      "bm25_weight": 0.5,
+      "hit": 1.0,
+      "mrr": 0.9792,
+      "top1_cos": 0.5687,
+      "n": 24
+    }
+  }
+}

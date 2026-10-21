@@ -1,0 +1,66 @@
+# =============================================================================
+# rag-backend 后端服务编排
+#
+# 设计取舍：本文件**只定义后端服务**，不定义 Milvus。
+#
+# 原因：Milvus 属于长期运行的基础设施，本机已有一套完整编排
+#       （etcd + minio + standalone，容器名 milvus-standalone / milvus-etcd /
+#        milvus-minio）。若此处再定义一遍，会因容器名与端口（19530/9091）
+#        冲突而无法启动。
+#
+# 用法：
+#   1. 先确保 Milvus 已运行：
+#        cd H:\Docker\milvus && docker compose up -d
+#   2. 再启动后端（显式指定根目录的 .env，见下方环境变量说明）：
+#        cd H:\work\rag-backend
+#        docker compose -f deploy/docker-compose.yml --env-file .env up -d --build
+#
+# 环境变量说明：本文件不硬编码任何机器相关的值。LLM 端点/模型名、两个权重
+#   目录都从 .env 读取（`--env-file .env`）。语法 `${VAR:?提示}` 表示该变量
+#   未设置时直接报错退出——与 Settings.validate_runtime() 的「启动期硬失败」
+#   保持一致，避免容器起来了但检索链路是废的。
+#
+# 若确实需要项目自带的 Milvus，把 H:\Docker\milvus\docker-compose.yml
+# 复制过来并把 container_name 与端口改成不冲突的值即可。
+# =============================================================================
+
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: rag-backend:0.1.0
+    container_name: rag-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      APP_ENV: local
+      # 容器访问宿主机服务：Windows / macOS 下用 host.docker.internal
+      MILVUS_HOST: host.docker.internal
+      MILVUS_PORT: 19530
+      # 注意：容器内的 host.docker.internal 与服务端的 127.0.0.1 不是一回事，
+      # 故这里不直接复用 .env 的 LLM_BASE_URL，而是按同一主机名重写。
+      LLM_BASE_URL: ${LLM_BASE_URL_HOST:?请在 .env 中设置 LLM_BASE_URL_HOST（如 http://host.docker.internal:11434/v1）}
+      LLM_MODEL: ${LLM_MODEL:?请在 .env 中设置 LLM_MODEL（如 qwen2:7b）}
+      # 模型权重挂载进容器后的路径，见下方 volumes
+      EMBEDDING_MODEL_PATH: /models/bge-large-zh-v1.5
+      RERANK_MODEL_PATH: /models/bge-reranker-base
+      # 权重已在本机，禁止联网拉取
+      HF_HUB_OFFLINE: "1"
+      # Milvus 走 gRPC，若宿主机有全局代理必须放行
+      NO_PROXY: localhost,127.0.0.1,host.docker.internal
+      SQLITE_PATH: /app/data/rag.db
+      UPLOAD_DIR: /app/data/uploads
+      # 令牌签名密钥：容器内必须显式传入，缺了服务会拒绝启动
+      # （与 LLM/模型路径同一套规则：不在 compose 里写死任何机密。
+      #   生成方式见 .env.example，别手敲）
+      AUTH_SECRET_KEY: ${AUTH_SECRET_KEY:?请在 .env 中设置 AUTH_SECRET_KEY}
+    volumes:
+      # 运行时数据持久化
+      - ../data:/app/data
+      # 模型权重以只读方式挂入，避免复制进镜像（体积数 GB）
+      - H:/models:/models:ro
+    extra_hosts:
+      # Linux 下 host.docker.internal 需显式声明
+      - "host.docker.internal:host-gateway"
