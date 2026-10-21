@@ -153,8 +153,9 @@ Milvus 里若还残留旧向量也会被清掉。
 Windows 计划任务（每天 02:30，保留 14 份）：
 
 ```powershell
-$py     = "H:\work\rag-backend\.venv\Scripts\python.exe"
-$script = "H:\work\rag-backend\scripts\backup.py"
+$root   = "<项目根目录>"            # 换成你本地的绝对路径
+$py     = "$root\.venv\Scripts\python.exe"
+$script = "$root\scripts\backup.py"
 Register-ScheduledTask -TaskName "rag-backup" `
   -Trigger (New-ScheduledTaskTrigger -Daily -At 02:30) `
   -Action  (New-ScheduledTaskAction -Execute $py `

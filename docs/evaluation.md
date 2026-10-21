@@ -78,7 +78,7 @@
 在项目根目录（`.env` 按相对路径加载）：
 
 ```bash
-cd H:\work\rag-backend
+cd <项目根目录>
 
 # 全量（18 题，含 RAGAS；本机 7B 约 5~6 分钟）
 .venv\Scripts\python.exe scripts\evaluate_rag.py

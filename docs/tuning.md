@@ -159,7 +159,7 @@ chunk_size  overlap  chunks  avg_chars  hit  mrr     top1_cos
 ## 六、怎么复跑
 
 ```bash
-cd H:\work\rag-backend
+cd <项目根目录>
 set NO_PROXY=localhost,127.0.0.1,::1
 .venv\Scripts\python.exe scripts/tune_retrieval.py                    # 三阶段全跑（约 8 分钟）
 .venv\Scripts\python.exe scripts/tune_retrieval.py --stage recall     # 只扫召回（约 1.5 分钟）

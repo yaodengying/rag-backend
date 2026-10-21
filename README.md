@@ -353,7 +353,7 @@ ollama list                           # 应能看到 qwen2:7b
 ### 4.3 安装与配置
 
 ```powershell
-cd H:\work\rag-backend
+cd <项目根目录>
 py -3.14 -m venv .venv                # 已有 .venv 可跳过（本项目现用 PyCharm 建的 3.14.7 环境）
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
@@ -400,7 +400,7 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"   # 生成 AUTH_SEC
 ### 4.5 启动
 
 ```powershell
-cd H:\work\rag-backend            # cwd 必须是项目根：.env 按相对路径加载
+cd <项目根目录>                    # cwd 必须是项目根：.env 按相对路径加载
 $env:NO_PROXY = "localhost,127.0.0.1,::1"
 .\.venv\Scripts\python.exe scripts\dev.py --port 8000       # 推荐：自带确定性热重载
 ```
@@ -825,7 +825,7 @@ curl -i http://127.0.0.1:8000/api/v1/auth/me -H "Authorization: Bearer <access_t
 ### 6.1 怎么跑
 
 ```powershell
-cd H:\work\rag-backend
+cd <项目根目录>
 
 # 全量（18 题 = 16 可答 + 2 应拒答；本机 7B 约 4.5 分钟）
 .\.venv\Scripts\python.exe scripts\evaluate_rag.py

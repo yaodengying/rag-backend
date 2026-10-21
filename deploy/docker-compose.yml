@@ -12,7 +12,7 @@
 #   1. 先确保 Milvus 已运行：
 #        cd H:\Docker\milvus && docker compose up -d
 #   2. 再启动后端（显式指定根目录的 .env，见下方环境变量说明）：
-#        cd H:\work\rag-backend
+#        cd <项目根目录>
 #        docker compose -f deploy/docker-compose.yml --env-file .env up -d --build
 #
 # 环境变量说明：本文件不硬编码任何机器相关的值。LLM 端点/模型名、两个权重
