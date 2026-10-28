@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from app.core.config import RERANK_K_HARD_LIMIT, TOP_K_HARD_LIMIT
+
 
 class SourceOut(BaseModel):
     """检索来源（用于前端展示引用）。"""
@@ -108,8 +110,23 @@ class ChatRequest(BaseModel):
             "（本机 7B 一次改写约 2~4s）。非流式 /chat 恒重试一次，与本字段无关。"
         ),
     )
-    top_k: int = Field(8, ge=1, le=50, description="向量召回条数")
-    rerank_k: int = Field(4, ge=1, le=20, description="重排后保留条数")
+    top_k: int | None = Field(
+        None,
+        ge=1,
+        le=TOP_K_HARD_LIMIT,
+        description=(
+            "每路召回条数。**不传（或传 null）用服务端配置 RETRIEVE_TOP_K**，"
+            "而不是在协议里写死一个数字：默认值只由服务端持有，"
+            "GET /chat/options 可查。adaptive 模式下这是上限，"
+            "不保证一定返回这么多条"
+        ),
+    )
+    rerank_k: int | None = Field(
+        None,
+        ge=1,
+        le=RERANK_K_HARD_LIMIT,
+        description="重排后保留条数。不传用服务端配置 RERANK_TOP_N",
+    )
 
 
 class ChatResponse(BaseModel):
@@ -172,6 +189,24 @@ class ChatOptionsOut(BaseModel):
         description=(
             "非流式 /chat 是否恒重试一次（与 enable_retry 无关）："
             "调用方本来就在等完整答案，重试不额外增加用户可感的等待"
+        ),
+    )
+    retrieve_top_k: int = Field(
+        ...,
+        description=(
+            "未显式传 top_k 时每路召回的深度（配置 RETRIEVE_TOP_K）。"
+            "与 rerank_top_n 放在这里，是因为前端要渲染这两个输入框的初始值——"
+            "让前端抄一份 8/4，配置一改就漂，且没有任何报错"
+        ),
+    )
+    rerank_top_n: int = Field(
+        ..., description="未显式传 rerank_k 时送进提示词的条数（配置 RERANK_TOP_N）"
+    )
+    retrieve_k_mode: str = Field(
+        ...,
+        description=(
+            "召回深度模式：fixed（固定取 retrieve_top_k 条）或 adaptive"
+            "（在 [RETRIEVE_K_MIN, min(top_k, RETRIEVE_K_MAX)] 内按分数断层收缩）"
         ),
     )
     grounding_action: str = Field(

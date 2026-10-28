@@ -144,6 +144,7 @@ chunk_size  overlap  chunks  avg_chars  hit  mrr     top1_cos
 | 参数 | 取值 | 依据 |
 |---|---|---|
 | `RETRIEVE_TOP_K` | 8 | ≥6 饱和；4 掉到 0.9583、2 掉到 0.9167 |
+| `RETRIEVE_K_MODE` | `fixed` | 默认关闭：下面所有数字都是在固定 k 上量的。`adaptive` 会改变每次实际返回条数，开启前先重跑本脚本并重测评估 |
 | `HYBRID_VECTOR_WEIGHT` / `HYBRID_BM25_WEIGHT` | 0.5 / 0.5 | 最优档；纯向量仅 0.8368（+0.14 来自 BM25） |
 | `HYBRID_RRF_K` | 60 | 原论文与业界通行值；本量级（8~50 条）下偏平滑属安全 |
 | `RERANK_TOP_N` | 4 | 基准测不出差别；按"上下文纯度"定，5 条以上纯增 token |

@@ -16,16 +16,25 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from app.core.config import RERANK_K_HARD_LIMIT, TOP_K_HARD_LIMIT
+
 
 class RetrievalRequest(BaseModel):
     """检索请求。"""
 
     query: str = Field(..., min_length=1, max_length=2000, description="查询文本")
     top_k: int | None = Field(
-        None, ge=1, le=100, description="每路召回条数；不传则用服务端配置"
+        None,
+        ge=1,
+        le=TOP_K_HARD_LIMIT,
+        description="每路召回条数；不传则用服务端配置（RETRIEVE_TOP_K）。"
+        "adaptive 模式下这是上限，不保证一定返回这么多条",
     )
     rerank_k: int | None = Field(
-        None, ge=1, le=50, description="重排后保留条数；不传则用服务端配置"
+        None,
+        ge=1,
+        le=RERANK_K_HARD_LIMIT,
+        description="重排后保留条数；不传则用服务端配置（RERANK_TOP_N）",
     )
     debug: bool = Field(
         False,

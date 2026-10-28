@@ -33,6 +33,7 @@
     | 只跑一次召回      | retrieve_with_trace 不得让 Embedding/两路检索各做两遍               |
     | 图节点            | make_retrieve_node：用 question、优先 rewritten_question、缺参短路  |
     | 稠密路阈值        | 纯向量模式用 MIN_SIMILARITY；混合模式默认不设限（否则向量路被静默清空）|
+    | 动态 k            | 解析：None→配置、显式→硬上限、0 原样；adaptive 按本路分数断层收缩  |
 
     最后一行是修掉一个真实故障后补的回归断言：短查询对长块的余弦相似度只有
     0.28~0.35，配上 MIN_SIMILARITY=0.35 会让整条稠密路静默失活，
@@ -85,6 +86,7 @@ from app.infrastructure.vectorstore import MilvusVectorStore  # noqa: E402
 from app.rag.fusion import DEFAULT_RRF_K, fuse, fuse_detailed, rrf_score  # noqa: E402
 from app.rag.nodes import make_retrieve_node  # noqa: E402
 from app.rag.retrieval import HybridRetriever  # noqa: E402
+from app.rag.topk import TOP_K_HARD_LIMIT, adaptive_k, resolve_k  # noqa: E402
 from app.services.retrieval_service import RetrievalService  # noqa: E402
 
 DIM = 8
@@ -1189,6 +1191,173 @@ def check_dense_threshold_mode(store: MilvusVectorStore) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 10. 动态 k
+# ---------------------------------------------------------------------------
+
+
+class _ScoringStore:
+    """按预设分数返回结果的假向量库，并记录每次 limit。
+
+    为什么要记录 limit：adaptive 的第一步是"按上限过采样、再截断"，
+    若实现成"先按 K_MIN 取"，索引里排第 5 的正确片段根本不会出现在结果里，
+    断崖也就永远看不到——这是个不会报错、只会变差的实现错误。
+    """
+
+    def __init__(self, dense: list[float], sparse: list[float]) -> None:
+        self._dense = dense
+        self._sparse = sparse
+        self.dense_limits: list[int] = []
+        self.bm25_limits: list[int] = []
+
+    def search(self, kb_id, query_embedding, top_k, min_score=None):  # noqa: ANN001
+        self.dense_limits.append(int(top_k))
+        return [
+            _hit(f"d{i}", f"稠密片段{i}", vector=score)
+            for i, score in enumerate(self._dense[: int(top_k)], start=1)
+        ]
+
+    def search_bm25(self, kb_id, query, top_k, min_score=None):  # noqa: ANN001
+        self.bm25_limits.append(int(top_k))
+        return [
+            _hit(f"b{i}", f"稀疏片段{i}", bm25=score)
+            for i, score in enumerate(self._sparse[: int(top_k)], start=1)
+        ]
+
+
+def check_dynamic_k() -> None:
+    """动态 k：解析只留一处 + adaptive 只收缩、不放大。"""
+    section("10. 动态 k：统一解析 + 按本路分数的断层截断")
+
+    # --- 10.1 resolve_k：请求值 → 配置 → 硬上限 ---
+    check("resolve_k：None 用配置默认值", resolve_k(None, default=8) == 8)
+    check("resolve_k：显式值覆盖默认值", resolve_k(3, default=8) == 3)
+    check(
+        "resolve_k：超过硬上限被夹住（HTTP 的 le 不是唯一防线）",
+        resolve_k(10**6, default=8) == TOP_K_HARD_LIMIT,
+        f"实际 {resolve_k(10**6, default=8)}",
+    )
+    check(
+        "resolve_k：0 原样返回，不偷偷改成 1（下游按空结果处理）",
+        resolve_k(0, default=8) == 0,
+    )
+
+    # --- 10.2 adaptive_k：纯函数，先把算法钉住 ---
+    check(
+        "adaptive_k：明显断层 → 断在 2 条",
+        adaptive_k([0.90, 0.88, 0.30, 0.28], k_min=2, k_max=8, drop_ratio=0.25) == 2,
+    )
+    check(
+        "adaptive_k：平滑衰减不构成断层 → 取满上限",
+        adaptive_k([0.30, 0.29, 0.28, 0.27], k_min=2, k_max=8, drop_ratio=0.25) == 4,
+    )
+    check(
+        "adaptive_k：结果不足下限时不凭空造结果",
+        adaptive_k([0.31], k_min=4, k_max=8, drop_ratio=0.25) == 1,
+    )
+    check(
+        "adaptive_k：空输入 → 0",
+        adaptive_k([], k_min=4, k_max=16, drop_ratio=0.25) == 0,
+    )
+    check(
+        "adaptive_k：全 0 分没有可比信息 → 取满上限",
+        adaptive_k([0.0, 0.0, 0.0, 0.0], k_min=2, k_max=8, drop_ratio=0.25) == 4,
+    )
+
+    # --- 10.3 检索器：adaptive 的过采样与截断 ---
+    store = _ScoringStore(
+        dense=[0.90, 0.88, 0.30, 0.28],
+        sparse=[9.0, 8.9, 8.8, 8.7],
+    )
+    adaptive = HybridRetriever(
+        embedder=FakeEmbedder(),
+        vector_store=store,
+        hybrid_enabled=True,
+        top_k=8,
+        k_mode="adaptive",
+        k_min=2,
+        k_max=8,
+        k_drop_ratio=0.25,
+    )
+    trace = adaptive.recall("kb-dyn", "查询")
+    check(
+        "adaptive：两路各按上限取（8 条），没有提前截断",
+        store.dense_limits == [8] and store.bm25_limits == [8],
+        f"dense={store.dense_limits} bm25={store.bm25_limits}",
+    )
+    check(
+        "adaptive：稠密路断在 2 条、BM25 路取满 4 条（各看各的分数）",
+        trace.k_dense == 2 and trace.k_bm25 == 4,
+        f"dense={trace.k_dense} bm25={trace.k_bm25}",
+    )
+    check(
+        "adaptive：融合后保留 max(2,4)=4 条",
+        trace.k_selected == 4 and len(trace.fused) == 4,
+        f"k_selected={trace.k_selected} fused={len(trace.fused)}",
+    )
+    check(
+        "adaptive：日志摘要能直接看出本次用的 k",
+        "k=adaptive:4" in trace.describe(),
+        trace.describe(),
+    )
+
+    # --- 10.4 fixed 模式必须与改造前完全一致 ---
+    fixed_store = _ScoringStore(dense=[0.9, 0.8, 0.7, 0.6], sparse=[9, 8, 7, 6])
+    fixed = HybridRetriever(
+        embedder=FakeEmbedder(),
+        vector_store=fixed_store,
+        hybrid_enabled=True,
+        top_k=3,
+        k_mode="fixed",
+    )
+    fixed_trace = fixed.recall("kb-dyn", "查询")
+    check(
+        "fixed：两路各取 3 条（与改造前一致）",
+        fixed_store.dense_limits == [3] and fixed_store.bm25_limits == [3],
+        f"dense={fixed_store.dense_limits} bm25={fixed_store.bm25_limits}",
+    )
+    check(
+        "fixed：融合后截 3 条、日志标注 fixed",
+        fixed_trace.k_selected == 3 and "k=fixed:3" in fixed_trace.describe(),
+        fixed_trace.describe(),
+    )
+
+    # --- 10.5 adaptive 不放大调用方要求的深度 ---
+    capped_store = _ScoringStore(dense=[0.9, 0.8, 0.7, 0.6, 0.5], sparse=[])
+    capped = HybridRetriever(
+        embedder=FakeEmbedder(),
+        vector_store=capped_store,
+        hybrid_enabled=False,
+        top_k=8,
+        k_mode="adaptive",
+        k_min=2,
+        k_max=4,
+    )
+    capped.recall("kb-dyn", "查询", top_k=50)
+    check(
+        "adaptive：K_MAX 拦住显式传大的 top_k（只取 4 条）",
+        capped_store.dense_limits == [4],
+        f"dense={capped_store.dense_limits}",
+    )
+
+    small_store = _ScoringStore(dense=[0.9, 0.8], sparse=[])
+    small = HybridRetriever(
+        embedder=FakeEmbedder(),
+        vector_store=small_store,
+        hybrid_enabled=False,
+        top_k=8,
+        k_mode="adaptive",
+        k_min=4,
+        k_max=8,
+    )
+    small_trace = small.recall("kb-dyn", "查询", top_k=1)
+    check(
+        "adaptive：请求深度小于 K_MIN 时不放大（K_MIN 不是强制下限）",
+        small_trace.k_selected == 1 and len(small_trace.fused) == 1,
+        f"k_selected={small_trace.k_selected} fused={len(small_trace.fused)}",
+    )
+
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
@@ -1212,7 +1381,8 @@ def main() -> int:
     print(f"  真实 collection  : {settings.milvus_collection}（全程不触碰）")
     print(f"  混合检索配置      : enabled={settings.hybrid_enabled} "
           f"k={settings.hybrid_rrf_k} 权重={settings.hybrid_vector_weight}/"
-          f"{settings.hybrid_bm25_weight} 召回深度={settings.retrieve_top_k}")
+          f"{settings.hybrid_bm25_weight} 召回深度={settings.retrieve_top_k}"
+          f" 模式={settings.retrieve_k_mode}")
 
     real_rows_before: int | None = None
     store = MilvusVectorStore(collection=COLLECTION)
@@ -1233,8 +1403,9 @@ def main() -> int:
         check_retrieval_service(store)
         check_graph_node(store)
         check_dense_threshold_mode(store)
+        check_dynamic_k()
 
-        section("10. 收尾与残留检查")
+        section("11. 收尾与残留检查")
         dropped = store.drop_collection()
         check("临时 collection 已删除", dropped and not store.client.has_collection(COLLECTION))
         check("旧 schema 的临时 collection 也未残留",

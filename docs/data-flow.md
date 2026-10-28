@@ -395,7 +395,7 @@ services/retrieval_service.py
 |---|---|---|---|
 | `kb_id` / `question` | 入参 | retrieve / generate | 生成用**原始问题**（改写只是给检索用的） |
 | `history` | 入参 | —（预留） | 多轮上下文；提示词里尚未插入历史消息的位置 |
-| `top_k` / `rerank_k` | 入参 | retrieve / rerank | 由 `ChatService._initial_state` 显式填配置默认值 |
+| `top_k` / `rerank_k` | 入参 | retrieve / rerank | 由 `ChatService._initial_state` 显式填配置默认值（请求不传才用默认，再夹到服务端硬上限）；`retrieve` 在 `RETRIEVE_K_MODE=adaptive` 时还会按每路分数的断层再收缩，见 `rag/topk.py` |
 | `rewritten_question` | retrieve（初值）/ rewrite / `ask_stream` 重试 | retrieve / rerank | 首轮由 retrieve 填成 `question`，改写后覆盖；流式重试时由 `ask_stream` 直接写入初值 |
 | `candidates` | retrieve | rerank | 融合后的候选（`fusion_score` 已回填） |
 | `ranked` | rerank | generate / **条件边** | 送入 LLM 的最终上下文；条件边的判据 |

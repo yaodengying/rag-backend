@@ -169,7 +169,8 @@ def render_markdown(payload: dict) -> str:
     lines.append(f"- 裁判模型：`{cfg.get('llm_model')}` @ `{cfg.get('llm_base_url')}`")
     lines.append(f"- 向量模型：`{cfg.get('embedding_model')}`（{cfg.get('embedding_device')}）")
     lines.append(
-        f"- 检索配置：top_k={cfg.get('retrieve_top_k')}，"
+        f"- 检索配置：top_k={cfg.get('retrieve_top_k')}"
+        f"（{cfg.get('retrieve_k_mode', 'fixed')}），"
         f"rerank_k={cfg.get('rerank_top_n')}，"
         f"重排={'开' if cfg.get('rerank_enabled') else '关'}"
     )

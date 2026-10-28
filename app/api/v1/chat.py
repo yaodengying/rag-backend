@@ -164,6 +164,9 @@ async def chat_options(service: ChatService = Depends(get_chat_service)) -> Chat
         stream_retry_max_attempts=service.max_retry,
         stream_events=["retry", "sources", "delta", "done", "error"],
         non_stream_always_retries=True,
+        retrieve_top_k=service.default_top_k,
+        rerank_top_n=service.default_rerank_k,
+        retrieve_k_mode=service.retrieve_k_mode,
         grounding_action=service.grounding_action,
     )
 

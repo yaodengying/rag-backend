@@ -34,6 +34,13 @@
         精度交给交叉编码器重排（它有自己的 logits 阈值）。
         纯向量模式下没有重排这个下游闸门，阈值仍是必需的——
         同一个 `HybridRetriever` 按模式取不同的默认值，见 `__init__`。
+
+    动态 k（`RETRIEVE_K_MODE=adaptive`）：
+        默认 fixed —— 每路固定取调用方要求的 top_k，融合后同样截这么多条，
+        与历史行为逐位一致。adaptive 时先按上限取（**不放大** top_k），再按
+        每路自己的分数找断层，截到 `[RETRIEVE_K_MIN, 上限]`，算法见
+        `rag/topk.py`。为什么不按融合分截：融合分只由名次决定，任何语料都会
+        切出同一条曲线，那个"动态"只是换了个写法的固定值。
 """
 
 from __future__ import annotations
@@ -46,6 +53,7 @@ from app.core.exceptions import AppError, RetrievalError
 from app.domain.models import RetrievedChunk
 from app.domain.ports import EmbedderPort, VectorStorePort
 from app.rag.fusion import fuse_detailed
+from app.rag.topk import TOP_K_HARD_LIMIT, adaptive_k, resolve_k
 
 logger = logging.getLogger(__name__)
 
@@ -75,12 +83,29 @@ class RecallTrace:
     让真正不同的片段排不进来（详见 `rag/fusion.py` 的说明）。
     """
 
+    k_mode: str = "fixed"
+    """本次生效的深度模式（fixed / adaptive）。
+
+    放进 trace 是刻意的：adaptive 打开后"这次为什么只返回 3 条"必须能在一行
+    日志里读到，否则只能靠猜是阈值、去重还是动态截断干的。"""
+    k_selected: int = 0
+    """融合后实际保留的条数。adaptive 下这是拐点算出来的值，
+    fixed 下等于调用方要求的深度（不是实际命中数——后者看 `len(fused)`）。"""
+    k_dense: int = 0
+    k_bm25: int = 0
+    """两路各自生效的深度。fixed 模式下两者都等于 k_selected。"""
+
     def describe(self) -> str:
         """一行摘要，适合直接打日志。"""
         dedup = f" 去重={self.duplicates_removed}" if self.duplicates_removed else ""
+        # k 必须一眼可读：adaptive 下"这次为什么只留了 3 条"是排查的第一问，
+        # 而 fixed 模式下这个值等于调用方要求，写出来能直接看出请求有没有生效。
+        k_desc = f"k={self.k_mode}:{self.k_selected}"
+        if self.k_mode == "adaptive":
+            k_desc += f"(dense={self.k_dense} bm25={self.k_bm25})"
         return (
             f"query={self.query!r} hybrid={self.hybrid_enabled} "
-            f"稠密下限={self.dense_min_similarity} "
+            f"稠密下限={self.dense_min_similarity} {k_desc} "
             f"向量召回={len(self.vector_hits)} BM25召回={len(self.bm25_hits)} "
             f"融合后={len(self.fused)}{dedup}"
         )
@@ -99,6 +124,10 @@ class HybridRetriever:
         vector_store: VectorStorePort,
         *,
         top_k: int | None = None,
+        k_mode: str | None = None,
+        k_min: int | None = None,
+        k_max: int | None = None,
+        k_drop_ratio: float | None = None,
         hybrid_enabled: bool | None = None,
         rrf_k: int | None = None,
         vector_weight: float | None = None,
@@ -111,7 +140,15 @@ class HybridRetriever:
         Args:
             embedder: 向量化器（编码查询）
             vector_store: 向量库（同时提供稠密与 BM25 两路检索）
-            top_k: 每路召回深度，None 时取 settings.retrieve_top_k
+            top_k: 每路召回深度，None 时取 settings.retrieve_top_k。**这是上限**：
+                调用方仍可在单次 `recall(top_k=...)` 里改小；adaptive 模式只会在
+                这个值之内收缩，不会把它放大。
+            k_mode: 深度模式 `fixed` / `adaptive`，None 时取
+                `settings.retrieve_k_mode`（默认 fixed，与历史行为一致）。
+            k_min: adaptive 的下限，None 时取 `settings.retrieve_k_min`
+            k_max: adaptive 的上限（同时是过采样条数），None 时取
+                `settings.retrieve_k_max`。实际取 `min(top_k, k_max)`。
+            k_drop_ratio: 断层判据，None 时取 `settings.retrieve_k_drop_ratio`
             hybrid_enabled: 是否启用 BM25 路，None 时取 settings.hybrid_enabled
             rrf_k: RRF 平滑常数，None 时取 settings.hybrid_rrf_k
             vector_weight: 稠密路权重，None 时取 settings.hybrid_vector_weight
@@ -131,6 +168,32 @@ class HybridRetriever:
         self._embedder = embedder
         self._vector_store = vector_store
         self._top_k = int(settings.retrieve_top_k if top_k is None else top_k)
+        self._k_mode = str(
+            settings.retrieve_k_mode if k_mode is None else k_mode
+        ).strip().lower()
+        if self._k_mode not in {"fixed", "adaptive"}:
+            # 拼成 "adaptve" 时若不拦，会静默走 fixed ——
+            # 表现是"这个开关明明开了却什么都没发生"。
+            raise ValueError(
+                f"k_mode 只能是 fixed / adaptive，当前 {self._k_mode!r}"
+            )
+        self._k_min = int(settings.retrieve_k_min if k_min is None else k_min)
+        self._k_max = int(settings.retrieve_k_max if k_max is None else k_max)
+        self._k_drop_ratio = float(
+            settings.retrieve_k_drop_ratio if k_drop_ratio is None else k_drop_ratio
+        )
+        if self._k_min < 1:
+            raise ValueError(f"k_min 必须 >= 1，当前 {self._k_min}")
+        if self._k_max < self._k_min:
+            # 写反时 adaptive 每次都会切到 0 条，表现为"突然什么都搜不到"，
+            # 且不会报错——只能在这里拦。
+            raise ValueError(
+                f"k_max({self._k_max}) 不能小于 k_min({self._k_min})"
+            )
+        if not 0.0 <= self._k_drop_ratio <= 1.0:
+            raise ValueError(
+                f"k_drop_ratio 应落在 [0,1]，当前 {self._k_drop_ratio}"
+            )
         self._hybrid_enabled = (
             bool(settings.hybrid_enabled) if hybrid_enabled is None else bool(hybrid_enabled)
         )
@@ -163,8 +226,17 @@ class HybridRetriever:
 
     @property
     def top_k(self) -> int:
-        """每路召回深度。"""
+        """每路召回深度的**默认上限**（单次调用可用 top_k 参数改小）。"""
         return self._top_k
+
+    @property
+    def k_mode(self) -> str:
+        """当前生效的深度模式（fixed / adaptive）。
+
+        暴露出来是为了让日志与自检能直接回答"动态 k 到底开没开"——
+        这个开关配错时的症状是"结果条数不对"，而不是报错。
+        """
+        return self._k_mode
 
     @property
     def hybrid_enabled(self) -> bool:
@@ -198,7 +270,9 @@ class HybridRetriever:
         Args:
             kb_id: 知识库 ID
             query: 查询原文
-            top_k: 覆盖每路召回深度与本方法的返回条数；None 用构造时的值
+            top_k: 覆盖每路召回深度与本方法的返回条数；None 用构造时的值。
+                adaptive 模式下它是**上限**，不保证一定返回这么多条
+                （断层可能切得更短，见 `_adaptive_keep`）。
 
         Returns:
             融合后的候选列表；查询为空或无命中时返回空列表。
@@ -211,31 +285,76 @@ class HybridRetriever:
         query: str,
         top_k: int | None = None,
     ) -> RecallTrace:
-        """同 `retrieve()`，但把两路原始结果一并返回，便于调参。"""
+        """同 `retrieve()`，但把两路原始结果一并返回，便于调参。
+
+        `top_k` 是**天花板**：None 用构造期配置；给了就按它来（再受服务端
+        硬上限约束）。fixed 模式下它同时也是融合后的保留条数；adaptive 模式
+        下先取 `min(top_k, K_MAX)` 条，再按每路分数的断层收缩。
+        """
         text = (query or "").strip()
-        depth = self._top_k if top_k is None else int(top_k)
+        depth = resolve_k(top_k, default=self._top_k, hard_limit=TOP_K_HARD_LIMIT)
         trace = RecallTrace(
             query=text,
             hybrid_enabled=self._hybrid_enabled,
             dense_min_similarity=self._min_similarity,
+            k_mode=self._k_mode,
         )
 
         if not text or depth <= 0:
             logger.debug("检索跳过：query=%r depth=%s", text, depth)
             return trace
 
+        # adaptive 只**收缩**深度，不放大：取 min(depth, K_MAX)。
+        # fixed 模式下 fetch == depth，与历史行为逐位一致。
+        fetch = min(depth, self._k_max) if self._k_mode == "adaptive" else depth
+
         if not self._hybrid_enabled:
-            trace.vector_hits = self._dense(kb_id, text, depth)
+            trace.vector_hits = self._dense(kb_id, text, fetch)
         else:
             # 权重为 0 的路整条跳过：省一次网络往返，也让日志如实反映实际用了哪条路
             if self._vector_weight > 0:
-                trace.vector_hits = self._dense(kb_id, text, depth)
+                trace.vector_hits = self._dense(kb_id, text, fetch)
             if self._bm25_weight > 0:
-                trace.bm25_hits = self._sparse(kb_id, text, depth)
+                trace.bm25_hits = self._sparse(kb_id, text, fetch)
 
-        trace.fused = self._fuse(trace, depth)
+        keep = self._adaptive_keep(trace, upper=fetch)
+        trace.k_selected = keep
+        trace.fused = self._fuse(trace, keep)
         logger.info("检索完成：%s", trace.describe())
         return trace
+
+    def _adaptive_keep(self, trace: RecallTrace, *, upper: int) -> int:
+        """按断层收缩两路深度，返回融合后要保留的条数。
+
+        fixed 模式：两路深度与融合保留数都等于 `upper`（调用方要求的深度），
+        与改造前的行为逐位一致。
+        adaptive：分别对两路算断层，融合后保留 `max(k_dense, k_bm25)`。
+        为什么取 max 而不是两路之和：fixed 模式下两路同深度、融合后截同值，
+        取 max 正好复现它；取和会让 adaptive 反而比 fixed 留得更多，与"动态
+        收缩"的初衷相反。
+        """
+        if self._k_mode != "adaptive":
+            trace.k_dense = upper
+            trace.k_bm25 = upper
+            return upper
+
+        trace.k_dense = adaptive_k(
+            [_native_score(item, "vector_score") for item in trace.vector_hits],
+            k_min=self._k_min,
+            k_max=upper,
+            drop_ratio=self._k_drop_ratio,
+        )
+        trace.k_bm25 = adaptive_k(
+            [_native_score(item, "bm25_score") for item in trace.bm25_hits],
+            k_min=self._k_min,
+            k_max=upper,
+            drop_ratio=self._k_drop_ratio,
+        )
+        # 截断放在融合之前：融合只吃排名，先按断层裁掉"明显不相关"的尾部，
+        # 它们本来也抢不进 RRF 前列，却会占掉去重与截断的名额。
+        trace.vector_hits = trace.vector_hits[: trace.k_dense]
+        trace.bm25_hits = trace.bm25_hits[: trace.k_bm25]
+        return max(trace.k_dense, trace.k_bm25)
 
     def _fuse(self, trace: RecallTrace, depth: int) -> list[RetrievedChunk]:
         """融合两路结果，并把"上游给了乱序结果"这种故障翻译成 502。
@@ -310,3 +429,14 @@ class HybridRetriever:
                 kb_id,
             )
             return []
+
+
+def _native_score(item: RetrievedChunk, field: str) -> float:
+    """取某一路自己的原始分数（自适应只看这个，不看融合分）。
+
+    缺失按 0 处理：正常路径不会缺（`search()` 填 vector_score，
+    `search_bm25()` 填 bm25_score），真缺了也只影响本次截断，不该让一次
+    检索因为这个辅助函数而失败。
+    """
+    value = getattr(item, field)
+    return float(value) if value is not None else 0.0

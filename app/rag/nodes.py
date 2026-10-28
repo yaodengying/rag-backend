@@ -39,6 +39,7 @@ from app.rag.prompts import build_answer_prompts
 from app.rag.retrieval import HybridRetriever
 from app.rag.rewrite import rewrite_query
 from app.rag.state import MAX_RETRY, NO_ANSWER_TEXT, RAGState
+from app.rag.topk import RERANK_K_HARD_LIMIT, resolve_k
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +127,16 @@ def make_rerank_node(reranker: RerankerPort | None):
         """
         query = _query_of(state)
         candidates = list(state.get("candidates") or [])
-        keep = int(state.get("rerank_k") or get_settings().rerank_top_n)
+        # rerank_k 走统一解析口子：None/缺字段才用配置默认值，0 与负数原样
+        # 保留（下游按 "keep <= 0" 返回空 → 拒答）。改造前这里是
+        # `int(state.get("rerank_k") or 默认值)`，0 会被 `or` 悄悄换成 4，
+        # 与 RetrievalService 里 `is None` 的判断给出相反结果——同一份配置、
+        # 两条路径、两种行为，而且都没有日志。
+        keep = resolve_k(
+            state.get("rerank_k"),
+            default=get_settings().rerank_top_n,
+            hard_limit=RERANK_K_HARD_LIMIT,
+        )
 
         if not candidates or keep <= 0:
             logger.info("重排跳过：候选 %s 条，rerank_k=%s", len(candidates), keep)

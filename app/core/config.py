@@ -36,6 +36,13 @@ from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# 召回/重排条数的服务端硬上限。**请求体 schema 与服务层共用这两个数**：
+# 若 HTTP 允许 100、服务层却按 50 处理，同一个请求走接口与走脚本会拿到
+# 不同的条数，而这种差异只会在排查"为什么少了两条"时才被发现。
+# 放模块级而不是 Settings 字段，是因为它们与机器/部署无关，也不该被 .env 调。
+TOP_K_HARD_LIMIT = 100
+RERANK_K_HARD_LIMIT = 50
+
 
 class Settings(BaseSettings):
     """全局配置。字段名对应同名环境变量（大小写不敏感）。"""
@@ -159,6 +166,31 @@ class Settings(BaseSettings):
     # 只有在"库很大、且已确认重排前候选被噪声挤爆"时才设，取值用
     # scripts/tune_retrieval.py 打印的真实分数分布来定。
     hybrid_bm25_min_score: float = 0.0
+
+    # ---------- 动态 k（自适应召回深度）----------
+    # 每路召回深度怎么定：
+    #   fixed    —— 固定取调用方要求的 top_k（请求里的，或上面的 RETRIEVE_TOP_K）。
+    #               **默认值**，与历史行为逐位一致，既有评估基线不用重跑。
+    #   adaptive —— 先取 min(top_k, RETRIEVE_K_MAX) 条，再按**每路自己的分数**
+    #               找断层，截到 [RETRIEVE_K_MIN, 上面那个上限]。
+    #
+    # 为什么默认 fixed：这个开关会改变"每次请求到底返回几条"，而 README 里的
+    # MRR 数字是在固定 k 上量出来的。换了口径却不重跑评估，等于拿旧分数解释
+    # 新行为。开启前先跑 scripts/tune_retrieval.py 看真实分数分布。
+    retrieve_k_mode: Literal["fixed", "adaptive"] = "fixed"
+    # adaptive 的下限：宁可多留几条，也不要因为一条断崖切到只剩 1 条。
+    # 注意它**不会**把 top_k 抬上去——本来只有 3 条时就是 3 条。
+    retrieve_k_min: int = 4
+    # adaptive 的上限，同时是过采样的条数。它**不放大** top_k：
+    # 实际取 min(top_k, RETRIEVE_K_MAX)。想让动态范围摸到 16，就把
+    # RETRIEVE_TOP_K 设到 16（或请求里传 16），而不是只调大这一项；
+    # 它真正的用途是拦住"请求显式传 top_k=100"把重排候选撑爆的情况。
+    retrieve_k_max: int = 16
+    # 断层判据：相邻两条的落差 ≥ 该比例 × 本路最高分，才算"这里换主题了"。
+    # 余弦的量级随查询变化（中文短查询整体 0.28~0.35），只能看相对落差；
+    # 0.25 是保守值，只把断崖式落差当断层。具体语料上应先看分数分布再定，
+    # 别照抄这个数字——它和 RERANK_MIN_SCORE 一样是"语料相关"的。
+    retrieve_k_drop_ratio: float = 0.25
 
     # ---------- 问答 ----------
     # 流式问答「首轮检索没找到时，是否允许改写查询再检索一次」的**服务端默认值**。
@@ -397,6 +429,20 @@ class Settings(BaseSettings):
             )
         if self.retrieve_top_k <= 0:
             problems.append(f"RETRIEVE_TOP_K 必须为正整数 — 当前 {self.retrieve_top_k}")
+        if self.retrieve_k_min < 1:
+            problems.append(f"RETRIEVE_K_MIN 必须 >= 1 — 当前 {self.retrieve_k_min}")
+        if self.retrieve_k_max < self.retrieve_k_min:
+            # 写反时 adaptive 会把每次召回都截成 0 条，表现为"突然什么都搜不到"，
+            # 且不会报错——这类配置只能在这里拦。
+            problems.append(
+                f"RETRIEVE_K_MAX({self.retrieve_k_max}) 不能小于 "
+                f"RETRIEVE_K_MIN({self.retrieve_k_min})"
+            )
+        if not 0.0 <= self.retrieve_k_drop_ratio <= 1.0:
+            problems.append(
+                f"RETRIEVE_K_DROP_RATIO 应落在 [0,1] — 当前 {self.retrieve_k_drop_ratio}"
+                "（0 = 任何落差都算断层；1 = 几乎不切）"
+            )
         if self.rerank_enabled and self.rerank_top_n <= 0:
             problems.append(f"RERANK_TOP_N 必须为正整数 — 当前 {self.rerank_top_n}")
         if self.rerank_min_top_score < 0:

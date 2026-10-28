@@ -33,6 +33,7 @@ from app.core.exceptions import NotFoundError
 from app.domain.models import RetrievedChunk
 from app.domain.ports import ChunkRepositoryPort, RerankerPort
 from app.rag.retrieval import HybridRetriever, RecallTrace
+from app.rag.topk import RERANK_K_HARD_LIMIT, resolve_k
 from app.services.ownership import ensure_kb_owned
 
 logger = logging.getLogger(__name__)
@@ -138,7 +139,12 @@ class RetrievalService:
             NotFoundError: owner_id 非 None 且知识库不属于该账号
         """
         self._ensure_owned(kb_id, owner_id)
-        keep = self._rerank_top_n if rerank_k is None else int(rerank_k)
+        # None → 配置默认值；其余原样（含 0/负数）并夹到服务端硬上限。
+        # 与 rerank 节点共用同一个解析口子，两条路径对"没传"和"传 0"的解释
+        # 才不会各说各话。
+        keep = resolve_k(
+            rerank_k, default=self._rerank_top_n, hard_limit=RERANK_K_HARD_LIMIT
+        )
         trace = self._retriever.recall(kb_id, query, top_k=top_k)
 
         if keep <= 0 or not trace.fused:

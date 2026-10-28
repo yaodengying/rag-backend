@@ -119,6 +119,7 @@ def _config_snapshot() -> dict:
         "rerank_enabled": bool(settings.rerank_enabled),
         "rerank_model": Path(settings.rerank_model_path).name if settings.rerank_model_path else "",
         "retrieve_top_k": settings.retrieve_top_k,
+        "retrieve_k_mode": settings.retrieve_k_mode,
         "rerank_top_n": settings.rerank_top_n,
         "chunk_size": settings.chunk_size,
         "chunk_overlap": settings.chunk_overlap,

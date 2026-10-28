@@ -50,6 +50,7 @@ from app.rag.graph import NODE_REWRITE, route_after_rerank
 from app.rag.prompts import build_answer_prompts
 from app.rag.rewrite import rewrite_query
 from app.rag.state import MAX_RETRY, NO_ANSWER_TEXT
+from app.rag.topk import RERANK_K_HARD_LIMIT, TOP_K_HARD_LIMIT, resolve_k
 from app.services.mappers import chunk_preview
 from app.services.ownership import ensure_kb_owned
 
@@ -131,6 +132,11 @@ class ChatService:
         self._history_turns = int(get_settings().conversation_history_turns)
         self._default_top_k = int(get_settings().retrieve_top_k)
         self._default_rerank_k = int(get_settings().rerank_top_n)
+        # 深度模式：部署策略，构造时读一次。服务本身不持有检索器（它藏在图里），
+        # 所以这里存一份供 GET /chat/options 回给前端——默认值只由服务端持有，
+        # 前端不抄第二份。真正执行的是 HybridRetriever 自己的 k_mode，
+        # 两者在容器装配时来自同一个 Settings。
+        self._k_mode = str(get_settings().retrieve_k_mode)
         self._retry_default = (
             bool(get_settings().chat_stream_retry_default)
             if retry_default is None
@@ -152,6 +158,30 @@ class ChatService:
     def max_retry(self) -> int:
         """改写重试上限（与完整图共用 `state.MAX_RETRY` 这一份，不是另定的数）。"""
         return MAX_RETRY
+
+    @property
+    def default_top_k(self) -> int:
+        """请求未显式传 top_k 时每路召回的深度（配置 RETRIEVE_TOP_K）。
+
+        暴露出来是给 GET /chat/options 用的：前端要渲染"召回条数"输入框，
+        就必须知道服务端此刻的默认值，否则只能抄一份 8——配置一改就漂，
+        而且漂了没有任何报错。
+        """
+        return self._default_top_k
+
+    @property
+    def default_rerank_k(self) -> int:
+        """请求未显式传 rerank_k 时送进提示词的条数（配置 RERANK_TOP_N）。"""
+        return self._default_rerank_k
+
+    @property
+    def retrieve_k_mode(self) -> str:
+        """当前生效的召回深度模式（fixed / adaptive）。
+
+        取自配置而不是检索器实例：本类的职责是"怎么调图"，不持有检索器；
+        容器里的检索器与这里读的是同一个 Settings，不会分叉。
+        """
+        return self._k_mode
 
     @property
     def grounding_action(self) -> str:
@@ -707,8 +737,18 @@ class ChatService:
             "kb_id": kb_id,
             "question": question,
             "history": list(history or []),
-            "top_k": int(self._default_top_k if top_k is None else top_k),
-            "rerank_k": int(self._default_rerank_k if rerank_k is None else rerank_k),
+            # 没表态（None）才用配置默认值，并统一夹到服务端硬上限。
+            # 这里是 top_k/rerank_k 的**唯一**回落点：请求体 schema 不再抄一份
+            # 默认值（旧版把 8/4 写死在 ChatRequest 里，导致改 RETRIEVE_TOP_K
+            # 对 /chat 完全无效，日志里也看不出用的是谁的值）。
+            "top_k": resolve_k(
+                top_k, default=self._default_top_k, hard_limit=TOP_K_HARD_LIMIT
+            ),
+            "rerank_k": resolve_k(
+                rerank_k,
+                default=self._default_rerank_k,
+                hard_limit=RERANK_K_HARD_LIMIT,
+            ),
             "retry_count": int(retry_count),
         }
         if rewritten_question is not None:

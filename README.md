@@ -379,6 +379,7 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"   # 生成 AUTH_SEC
 | 变量 | 默认 | 调到什么时候 |
 |---|---|---|
 | `RETRIEVE_TOP_K` | 8 | 库很大想提高召回可到 12~16；**小于 6 会明显掉 MRR**（实测 2→0.9167、4→0.9583） |
+| `RETRIEVE_K_MODE` | `fixed` | `adaptive` 时先取 `min(top_k, RETRIEVE_K_MAX)` 条，再按每路分数的断层收缩到 `[RETRIEVE_K_MIN, 上限]`；不传 `top_k` 的请求现在真的走配置（旧版被 schema 写死的 8/4 挡住了）。改之前先看 `scripts/tune_retrieval.py` 的分数分布并重跑评估 |
 | `RERANK_TOP_N` | 4 | 上下文纯度 vs 覆盖面的权衡；7B 下 4 条已够 |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | 300 / 50 | 中文建议 150~300，**500 实测掉分** |
 | `HYBRID_VECTOR_WEIGHT` / `HYBRID_BM25_WEIGHT` | 0.5 / 0.5 | 只有比值有意义；0.7/0.3 实测略差 |
