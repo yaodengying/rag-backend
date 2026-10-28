@@ -30,6 +30,8 @@ class RAGState(TypedDict, total=False):
         rewritten_question: 查询改写后的文本；未改写时等于 question
         candidates: 混合检索召回的候选片段
         ranked: 重排后的片段（送入 LLM 的最终上下文）
+        usage: 本次上下文装箱的用量（token 数、丢了几条、利用率）；
+            由 generate 节点写入，供服务层回传与日志观测
         answer: 模型生成的回答文本
         refused: 是否因资料不足而拒答
         retry_count: 改写重试次数，用于限制回路深度
@@ -47,6 +49,10 @@ class RAGState(TypedDict, total=False):
     rewritten_question: Annotated[str, _keep_last]
     candidates: Annotated[list, _keep_last]
     ranked: Annotated[list, _keep_last]
+    # 上下文装箱的用量快照（见 rag/budget.py 的 ContextPlan.as_usage）。
+    # 用 dict 而不是 dataclass：状态要能被日志/trace 直接序列化，
+    # 也不该把 "预算" 这个纯计算模块的对象带进图的生命周期里。
+    usage: Annotated[dict, _keep_last]
 
     # ---- 输出 ----
     answer: Annotated[str, _keep_last]

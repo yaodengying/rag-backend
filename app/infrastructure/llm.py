@@ -64,6 +64,7 @@ from app.core.exceptions import (
     UpstreamError,
     UpstreamTimeoutError,
 )
+from app.core.llm_state import set_finish_reason
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,13 @@ _TIMEOUT_HINTS: tuple[str, ...] = (
     "timedout",
     "timed out",
     "time out",
+)
+
+# 各后端表达"被输出上限截断"的字段值。OpenAI 兼容后端用 length，
+# Anthropic 用 max_tokens，少数实现用 max_output_tokens——统一归一成 length，
+# 上层只判断一种值。
+_TRUNCATION_REASONS: frozenset[str] = frozenset(
+    {"length", "max_tokens", "max_output_tokens"}
 )
 
 # 不走代理的主机。本机后端（127.0.0.1:11434）必须放进 NO_PROXY，
@@ -105,6 +113,8 @@ class OpenAICompatibleLLM:
         api_key: str | None = None,
         temperature: float | None = None,
         timeout: int | None = None,
+        max_tokens: int | None = None,
+        max_tokens_field: str | None = None,
         client: Any = None,
     ) -> None:
         """记录配置，不建立连接。
@@ -115,6 +125,9 @@ class OpenAICompatibleLLM:
             api_key: 本机 Ollama 传任意非空值
             temperature: 采样温度，事实型问答建议 0.1~0.3
             timeout: 单次请求超时秒数
+            max_tokens: 输出上限（配置 `LLM_MAX_TOKENS`）。**必须显式下发**：
+                不传时输出上限完全由后端默认值决定，被截断也无人知晓。
+                它与上下文预算里的"输出预留 R"是同一个数，两处必须一致。
             client: **测试注入点**——传入实现了 `.invoke(messages)` /
                 `.astream(messages)` 的假 client，即可在不起 Ollama 的情况下
                 验证消息组装、内容抽取与错误映射（见 scripts/check_chat.py）。
@@ -128,6 +141,14 @@ class OpenAICompatibleLLM:
             float(settings.llm_temperature) if temperature is None else float(temperature)
         )
         self._timeout = int(settings.llm_timeout if timeout is None else timeout)
+        self._max_tokens = int(
+            settings.llm_max_tokens if max_tokens is None else max_tokens
+        )
+        self._max_tokens_field = str(
+            settings.llm_max_tokens_field
+            if max_tokens_field is None
+            else max_tokens_field
+        ).strip()
         self._client = client
 
     # ---------- 只读属性（供自检与日志读取）----------
@@ -159,6 +180,9 @@ class OpenAICompatibleLLM:
             UpstreamError: 上游不可用、超时、响应异常或返回空内容
         """
         messages = self._messages(system_prompt, user_prompt)
+        # 每次调用前清空：同一线程/任务上的上一次 length 不能残留到这一次，
+        # 否则一次正常的拒答会被标成"被截断"。
+        set_finish_reason(None)
         try:
             response = self._build_client().invoke(messages)
         except AppError:
@@ -169,6 +193,28 @@ class OpenAICompatibleLLM:
         except Exception as exc:  # noqa: BLE001 - 见模块文档「错误语义」
             raise self._translate(exc, streaming=False) from exc
 
+        reason = self._finish_reason_of(response)
+        if reason is None:
+            # 兜底：有些后端不返回 finish_reason，但会给 token 用量。
+            # 输出 token 顶到上限 = 极可能被截断；不猜更细的原因，只标记。
+            used = self._output_tokens_of(response)
+            if used is not None and 0 < self._max_tokens <= used:
+                reason = "length"
+                logger.warning(
+                    "后端未返回 finish_reason，但输出 token（%s）已达上限（%s），"
+                    "按截断处理",
+                    used,
+                    self._max_tokens,
+                )
+        reason = self._normalize_reason(reason)
+        set_finish_reason(reason)
+        if reason == "length":
+            logger.warning(
+                "回答达到输出上限被截断（%s=%s）：用户会收到半句话。"
+                "调大 LLM_MAX_TOKENS，或检查提示词是否在要求过长输出",
+                self._max_tokens_field,
+                self._max_tokens,
+            )
         return self._extract(response)
 
     async def stream(self, system_prompt: str, user_prompt: str) -> AsyncIterator[str]:
@@ -182,8 +228,13 @@ class OpenAICompatibleLLM:
             UpstreamError: 上游不可用或中途断开
         """
         messages = self._messages(system_prompt, user_prompt)
+        reason: str | None = None
+        set_finish_reason(None)
         try:
             async for chunk in self._build_client().astream(messages):
+                # 流式下 finish_reason 通常只在最后一片出现；逐片更新，
+                # 早片没有该字段时保留已有的值。
+                reason = self._finish_reason_of(chunk) or reason
                 delta = self._chunk_text(chunk)
                 if delta:
                     yield delta
@@ -192,6 +243,17 @@ class OpenAICompatibleLLM:
             raise
         except Exception as exc:  # noqa: BLE001
             raise self._translate(exc, streaming=True) from exc
+        # 只有正常迭代完才写回：客户端中途断开时 reason 未知，
+        # 保持 None 比猜一个值更诚实。
+        reason = self._normalize_reason(reason)
+        set_finish_reason(reason)
+        if reason == "length":
+            logger.warning(
+                "流式回答达到输出上限被截断（%s=%s）：流会正常结束，"
+                "但答案是半句话；done 事件会带 truncated=true",
+                self._max_tokens_field,
+                self._max_tokens,
+            )
 
     # ---------- 内部 ----------
 
@@ -239,6 +301,55 @@ class OpenAICompatibleLLM:
         )
 
     @staticmethod
+    def _finish_reason_of(message: Any) -> str | None:
+        """从响应/分片里取收尾原因（不同后端字段名不同）。
+
+        LangChain 把供应商字段收进 `response_metadata`：OpenAI 兼容后端给
+        `finish_reason`，Anthropic 给 `stop_reason`，Ollama 原生协议给
+        `done_reason`。取不到就返回 None（不猜）。
+        """
+        metadata = getattr(message, "response_metadata", None)
+        if not isinstance(metadata, dict):
+            return None
+        for key in ("finish_reason", "stop_reason", "done_reason"):
+            value = metadata.get(key)
+            if value:
+                return str(value)
+        return None
+
+    @staticmethod
+    def _normalize_reason(reason: str | None) -> str | None:
+        """把各后端的截断表达统一成 `length`，上层只判断一种值。"""
+        if reason is None:
+            return None
+        text = str(reason).strip().lower()
+        if text in _TRUNCATION_REASONS:
+            return "length"
+        return text or None
+
+    @staticmethod
+    def _output_tokens_of(message: Any) -> int | None:
+        """取本次生成的输出 token 数（finish_reason 缺失时的兜底判据）。
+
+        LangChain 新版本把用量放在 `usage_metadata.output_tokens`；
+        较早/不同供应商的版本放在 `response_metadata.token_usage.completion_tokens`。
+        都取不到就返回 None——**不猜**。
+        """
+        usage = getattr(message, "usage_metadata", None)
+        if isinstance(usage, dict):
+            value = usage.get("output_tokens")
+            if isinstance(value, int):
+                return value
+        metadata = getattr(message, "response_metadata", None)
+        if isinstance(metadata, dict):
+            token_usage = metadata.get("token_usage")
+            if isinstance(token_usage, dict):
+                value = token_usage.get("completion_tokens")
+                if isinstance(value, int):
+                    return value
+        return None
+
+    @staticmethod
     def _allow_localhost_bypass() -> None:
         """把本机地址并入 NO_PROXY（幂等，保留原有条目）。"""
         current = os.environ.get("NO_PROXY", "") or os.environ.get("no_proxy", "")
@@ -275,16 +386,25 @@ class OpenAICompatibleLLM:
             model=self._model,
             temperature=self._temperature,
             timeout=self._timeout,
+            # 输出上限**不**通过 ChatOpenAI 的 max_tokens 参数下发：
+            # langchain-openai 1.7 会把它改写成 max_completion_tokens，而
+            # Ollama / vLLM 的兼容层只认 max_tokens（实测 Ollama 0.40.5
+            # 对 max_completion_tokens 完全无视：限制 8 token 却输出了 477，
+            # finish_reason 仍是 stop）。extra_body 会被原样并入请求体，
+            # 字段名由 LLM_MAX_TOKENS_FIELD 决定。
+            extra_body={self._max_tokens_field: self._max_tokens},
             # 重试交给上层：LLM 调用失败通常是上游没起来或模型被卸载，
             # SDK 层静默重试 3 次只会让用户多等一分钟才看到 502。
             max_retries=0,
         )
         logger.info(
-            "LLM 客户端就绪：%s（model=%s temperature=%s timeout=%ss）",
+            "LLM 客户端就绪：%s（model=%s temperature=%s timeout=%ss %s=%s）",
             self._base_url,
             self._model,
             self._temperature,
             self._timeout,
+            self._max_tokens_field,
+            self._max_tokens,
         )
         return self._client
 

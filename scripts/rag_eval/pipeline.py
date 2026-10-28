@@ -39,6 +39,10 @@ class Prediction:
         refused: 是否拒答
         latency_ms: 本题端到端耗时（检索 + 重排 + 生成）
         error: 失败原因；非空表示这题没跑出结果
+        usage: 上下文用量（输入 token / 丢弃条数 / 利用率）。
+            来自 ChatResult.usage，用于 skill（rag-context-eval）的系统层指标：
+            只看质量不看 token，上线后成本会失控
+        truncated: 回答是否被输出上限截断（true 时该题的忠实度/完整度不可信）
     """
 
     sample: EvalSample
@@ -48,6 +52,8 @@ class Prediction:
     refused: bool = False
     latency_ms: int = 0
     error: str = ""
+    usage: dict | None = None
+    truncated: bool = False
 
     @property
     def ok(self) -> bool:
@@ -112,4 +118,6 @@ class RagPipeline:
             citations=list(result.answer.citations),
             refused=result.answer.refused,
             latency_ms=latency,
+            usage=result.usage,
+            truncated=result.truncated,
         )

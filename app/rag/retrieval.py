@@ -82,6 +82,11 @@ class RecallTrace:
     长期不为 0 说明库里有重复上传的副本——它们会挤占召回名额，
     让真正不同的片段排不进来（详见 `rag/fusion.py` 的说明）。
     """
+    near_duplicates_removed: int = 0
+    """融合时被「近重复」合并掉的条数（另存过的 PDF、重新解析出的同一段文本）。
+
+    与 `duplicates_removed` 分开：一个治上传流程，一个治解析/另存流程。
+    """
 
     k_mode: str = "fixed"
     """本次生效的深度模式（fixed / adaptive）。
@@ -98,6 +103,8 @@ class RecallTrace:
     def describe(self) -> str:
         """一行摘要，适合直接打日志。"""
         dedup = f" 去重={self.duplicates_removed}" if self.duplicates_removed else ""
+        if self.near_duplicates_removed:
+            dedup += f" 近重复={self.near_duplicates_removed}"
         # k 必须一眼可读：adaptive 下"这次为什么只留了 3 条"是排查的第一问，
         # 而 fixed 模式下这个值等于调用方要求，写出来能直接看出请求有没有生效。
         k_desc = f"k={self.k_mode}:{self.k_selected}"
@@ -134,6 +141,8 @@ class HybridRetriever:
         bm25_weight: float | None = None,
         min_similarity: float | None = None,
         bm25_min_score: float | None = None,
+        near_dupe_ratio: float | None = None,
+        near_dupe_min_chars: int | None = None,
     ) -> None:
         """注入端口与检索参数。
 
@@ -163,6 +172,13 @@ class HybridRetriever:
                 BM25 分无界且随语料漂移，所以**默认不设绝对阈值**；
                 需要压掉"只共享一个「的」"的噪声时，用 `tune_retrieval.py`
                 打印的真实分数来决定，别凭感觉写。
+            near_dupe_ratio: 近重复合并阈值（字符三元组 Jaccard），None 时取
+                `settings.hybrid_near_dupe_ratio`（默认 0.95）。0 = 关闭。
+                数字/型号不同、否定词不同的片段**不会**被合并
+                （见 `fusion._numeric_tokens` / `_negation_markers`）。
+            near_dupe_min_chars: 参与近重复合并的最小正文长度，None 时取
+                `settings.hybrid_near_dupe_min_chars`（默认 60）。短文本不合并，
+                保住"两篇文档引用同一句公告"的合法性。
         """
         settings = get_settings()
         self._embedder = embedder
@@ -213,6 +229,24 @@ class HybridRetriever:
         self._bm25_min_score = float(
             settings.hybrid_bm25_min_score if bm25_min_score is None else bm25_min_score
         )
+        self._near_dupe_ratio = float(
+            settings.hybrid_near_dupe_ratio
+            if near_dupe_ratio is None
+            else near_dupe_ratio
+        )
+        if not 0.0 <= self._near_dupe_ratio <= 1.0:
+            raise ValueError(
+                f"near_dupe_ratio 应落在 [0,1]，当前 {self._near_dupe_ratio}"
+            )
+        self._near_dupe_min_chars = int(
+            settings.hybrid_near_dupe_min_chars
+            if near_dupe_min_chars is None
+            else near_dupe_min_chars
+        )
+        if self._near_dupe_min_chars < 0:
+            raise ValueError(
+                f"near_dupe_min_chars 不能为负，当前 {self._near_dupe_min_chars}"
+            )
 
         if self._hybrid_enabled and self._vector_weight + self._bm25_weight <= 0:
             # 两路权重都是 0 时融合分会全为 0，排序退化成按 id 排——结果看似正常
@@ -372,6 +406,8 @@ class HybridRetriever:
                 vector_weight=self._vector_weight,
                 bm25_weight=self._bm25_weight,
                 top_k=depth,
+                near_dupe_ratio=self._near_dupe_ratio,
+                near_dupe_min_chars=self._near_dupe_min_chars,
             )
         except ValueError as exc:
             raise RetrievalError(f"混合检索融合失败：{exc}") from exc
@@ -382,6 +418,14 @@ class HybridRetriever:
                 "融合时合并了 %s 条重复副本（同名文件 + 相同正文）——"
                 "库中可能存在重复上传；去重发生在截断之前，名额已释放给其它片段",
                 result.duplicates_removed,
+            )
+        trace.near_duplicates_removed = result.near_duplicates_removed
+        if result.near_duplicates_removed:
+            logger.info(
+                "融合时合并了 %s 条近重复片段（相似度 ≥ %.2f，数字/型号一致）——"
+                "常见成因是同一份文档被另存/重新解析后以不同文件名入库",
+                result.near_duplicates_removed,
+                self._near_dupe_ratio,
             )
         return result.items
 

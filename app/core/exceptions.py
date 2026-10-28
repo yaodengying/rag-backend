@@ -187,6 +187,22 @@ class UpstreamError(AppError):
     http_status = 502
 
 
+class ContextWindowExceeded(AppError):
+    """上下文预算连"最小可用提示词"都装不下。
+
+    单独一个类而不是复用 UpstreamError：这不是上游坏了，而是**窗口/预留
+    这组参数与本模型不匹配**（典型是把 `LLM_CONTEXT_WINDOW` 按界面声明值
+    填了 262144，而实际服务的 `num_ctx` 只有 16384）。混进 502 会让运维
+    去重启 Ollama，而真正该改的是 `.env`。
+
+    为什么是 500 而不是 400：请求本身完全合法，是服务端配置/容量问题；
+    客户端重试同一个请求也不会变好。
+    """
+
+    code = "context_window_exceeded"
+    http_status = 500
+
+
 class UpstreamTimeoutError(UpstreamError):
     """上游超时（LLM 单次请求超过 LLM_TIMEOUT）。
 

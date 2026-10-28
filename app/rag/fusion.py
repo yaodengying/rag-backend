@@ -33,6 +33,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from app.domain.models import Chunk, RetrievedChunk
@@ -74,6 +75,13 @@ class FusionResult:
     这个数长期不为 0 说明库里有重复上传的文档：它们会**挤占召回名额**，
     让真正不同的片段排不进来。暴露出来才能发现，而不是等用户抱怨
     "怎么同一个文件出现四次"。
+    """
+    near_duplicates_removed: int = 0
+    """因「近重复」（字符三元组 Jaccard ≥ 阈值，且数字完全一致）被合并的条数。
+
+    与 `duplicates_removed` 分开计数：两者成因不同——
+    精确重复是"同一份文件传了多次"，近重复是"同一段内容被重新保存/重新切分
+    （如另存过的 PDF）"。混成一个数，就分不清该治上传流程还是该治解析流程。
     """
 
 
@@ -133,6 +141,8 @@ def fuse(
     bm25_weight: float = 0.5,
     top_k: int | None = None,
     dedupe: bool = True,
+    near_dupe_ratio: float = 0.0,
+    near_dupe_min_chars: int = 60,
 ) -> list[RetrievedChunk]:
     """把两路召回融合成一份按融合分降序的候选列表（去重后）。"""
     return fuse_detailed(
@@ -143,6 +153,8 @@ def fuse(
         bm25_weight=bm25_weight,
         top_k=top_k,
         dedupe=dedupe,
+        near_dupe_ratio=near_dupe_ratio,
+        near_dupe_min_chars=near_dupe_min_chars,
     ).items
 
 
@@ -155,6 +167,8 @@ def fuse_detailed(
     bm25_weight: float = 0.5,
     top_k: int | None = None,
     dedupe: bool = True,
+    near_dupe_ratio: float = 0.0,
+    near_dupe_min_chars: int = 60,
 ) -> FusionResult:
     """加权 RRF 融合 + **跨副本去重**，返回结果与去重计数。
 
@@ -166,6 +180,14 @@ def fuse_detailed(
         bm25_weight: 稀疏路权重，须 >= 0
         top_k: 融合后保留条数；None 表示全保留
         dedupe: 是否合并「同名文件 + 相同正文」的副本（默认开）。
+        near_dupe_ratio: 近重复判据（字符三元组 Jaccard），0 = 关闭。
+            HybridRetriever 从 `HYBRID_NEAR_DUPE_RATIO` 传入；默认 0.95。
+            **数字/型号、否定词、情态词必须完全一致**才算重复——「48 小时」与
+            「24 小时」、「可以」与「不可以」、「应当」与「可以」相似度都很高，
+            但它们不是重复，合并会删掉一条关键条款。
+        near_dupe_min_chars: 参与近重复合并的最小正文长度（折叠空白后）。
+            短文本不合并：两篇文档引用同一句公告是合法的，只有成段复制
+            才值得当作副本。
 
     Returns:
         FusionResult：items 为最终列表，duplicates_removed 为被合并的条数。
@@ -255,6 +277,14 @@ def fuse_detailed(
             kept.append(acc)
         results = kept
 
+    near_removed = 0
+    if near_dupe_ratio and near_dupe_ratio > 0 and len(results) > 1:
+        # 近重复放在精确去重**之后**：先按字符串键把"逐字相同"的副本合并掉，
+        # 剩下的才需要算相似度（O(n²) 的比较，先做廉价的那一步）。
+        results, near_removed = _merge_near_duplicates(
+            results, near_dupe_ratio, near_dupe_min_chars
+        )
+
     fused = [
         RetrievedChunk(
             chunk=acc.chunk,
@@ -266,7 +296,11 @@ def fuse_detailed(
     ]
     if top_k is not None and top_k >= 0:
         fused = fused[:top_k]
-    return FusionResult(items=fused, duplicates_removed=duplicates)
+    return FusionResult(
+        items=fused,
+        duplicates_removed=duplicates,
+        near_duplicates_removed=near_removed,
+    )
 
 
 def _assert_sorted(hits: list[RetrievedChunk], score_field: str) -> None:
@@ -292,3 +326,93 @@ def _assert_sorted(hits: list[RetrievedChunk], score_field: str) -> None:
                 "顺序错了融合分就没有意义"
             )
         previous = score
+
+
+def _merge_near_duplicates(
+    results: list[_Accumulator], ratio: float, min_chars: int
+) -> tuple[list[_Accumulator], int]:
+    """合并近重复片段（保留分更高、也就是更靠前的那条）。
+
+    判据（四条同时满足）：
+        1. 折叠空白后的正文长度 ≥ min_chars；
+        2. 字符三元组 Jaccard ≥ ratio；
+        3. 数字/型号里的数字串**完全相同**（见 `_numeric_tokens`）；
+        4. 否定词与情态词集合完全相同（见 `_negation_markers` / `_modality_markers`）。
+
+    第 1 条保住"短公告被两篇文档引用"的合法性；第 3、4 条是安全阀：
+    「客服须在 48 小时内响应」与「24 小时内响应」、「可以加急」与
+    「不可以加急」、「应当提交」与「可以提交」相似度都很高，但它们
+    **不是重复**；没有这几道闸门，去重会静默删掉一条真实条款
+    （skill 明确警告过）。文件名不参与判断：另存过的 PDF 正文相同但
+    名字不同，正是这里要合的场景。
+    """
+    kept: list[_Accumulator] = []
+    seen: list[tuple[set[str], tuple[str, ...], frozenset[str], frozenset[str]]] = []
+    removed = 0
+    for acc in results:
+        text = acc.chunk.text or ""
+        if len("".join(text.split())) < max(0, int(min_chars)):
+            kept.append(acc)
+            continue
+        signature = (
+            _numeric_tokens(text),
+            _negation_markers(text),
+            _modality_markers(text),
+        )
+        grams = _ngrams(text)
+        duplicate = False
+        for prev_grams, prev_numbers, prev_negations, prev_modalities in seen:
+            if signature != (prev_numbers, prev_negations, prev_modalities):
+                continue
+            if _jaccard(grams, prev_grams) >= ratio:
+                duplicate = True
+                break
+        if duplicate:
+            removed += 1
+            continue
+        kept.append(acc)
+        seen.append((grams, *signature))
+    return kept, removed
+
+
+def _ngrams(text: str, size: int = 3) -> set[str]:
+    """字符 n-gram 集合（先折叠空白）。中文不需要分词即可比较相似度。"""
+    compact = "".join((text or "").split())
+    if len(compact) <= size:
+        return {compact} if compact else set()
+    return {compact[i : i + size] for i in range(len(compact) - size + 1)}
+
+
+def _jaccard(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    union = left | right
+    return len(left & right) / len(union) if union else 0.0
+
+
+def _numeric_tokens(text: str) -> tuple[str, ...]:
+    """抽取数字串（含小数、版本号、型号里的数字），排序后用于可比性判断。"""
+    return tuple(sorted(re.findall(r"\d+(?:[.\-:/]\d+)*", text or "")))
+
+
+# 否定含义的字。不要求分词：宁可多拦一次（不合并），也不要把
+# 「不可以」和「可以」当成重复合并掉——那等于删掉一条约束。
+_NEGATION_RE = re.compile(r"[不无未非禁勿]")
+
+# 情态/强制力标记：应当 vs 可以、必须 vs 建议，是**不同条款**而不是重复。
+# 长词在前，避免「必须」被拆成「须」。
+_MODALITY_RE = re.compile(r"必须|不得|严禁|禁止|应当|应该|应|须|可以|可|建议|允许")
+
+
+def _negation_markers(text: str) -> frozenset[str]:
+    """文本里出现过的否定字集合；集合不同 → 不是重复。"""
+    return frozenset(_NEGATION_RE.findall(text or ""))
+
+
+def _modality_markers(text: str) -> frozenset[str]:
+    """文本里出现过的情态词集合；集合不同 → 不是重复。
+
+    例：「员工应当提交申请」与「员工可以提交申请」只差一个词，
+    相似度极高，但强制力完全不同——合并会删掉"应当"这条约束。
+    """
+    return frozenset(_MODALITY_RE.findall(text or ""))

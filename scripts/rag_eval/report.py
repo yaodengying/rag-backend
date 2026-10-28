@@ -76,9 +76,41 @@ def build_payload(
                 },
                 "scores": ragas_scores.get(pred.sample.id, {}),
                 "latency_ms": pred.latency_ms,
+                "usage": pred.usage,
+                "truncated": pred.truncated,
                 "error": pred.error,
             }
         )
+
+    # 上下文用量汇总（skill rag-context-eval 的"系统层"指标）：
+    # 质量分再高，输入 token 翻倍或长期触发压缩，也是不可发布的变化。
+    usages = [pred.usage for pred in predictions if pred.usage]
+    context_usage: dict = {}
+    if usages:
+        count = len(usages)
+        context_usage = {
+            "samples": count,
+            "prompt_tokens_avg": round(
+                sum(int(item.get("prompt_tokens", 0)) for item in usages) / count
+            ),
+            "evidence_tokens_avg": round(
+                sum(int(item.get("evidence_tokens", 0)) for item in usages) / count
+            ),
+            "history_tokens_avg": round(
+                sum(int(item.get("history_tokens", 0)) for item in usages) / count
+            ),
+            "utilization_avg": round(
+                sum(float(item.get("utilization", 0.0)) for item in usages) / count, 4
+            ),
+            "dropped_evidence_total": sum(
+                int(item.get("dropped_evidence", 0)) for item in usages
+            ),
+            "dropped_history_total": sum(
+                int(item.get("dropped_history", 0)) for item in usages
+            ),
+            "truncated_total": sum(1 for pred in predictions if pred.truncated),
+            "tokenizer": usages[0].get("tokenizer", ""),
+        }
 
     return {
         "generated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
@@ -91,6 +123,7 @@ def build_payload(
         "config": config,
         "metrics": [m.key for m in metrics],
         "summary": summary,
+        "context_usage": context_usage,
         "samples": per_sample,
         "duration_s": round(duration_s, 1),
     }
@@ -120,10 +153,11 @@ def write_reports(out_dir: Path, payload: dict) -> dict[str, Path]:
         writer.writerow(
             ["id", "kb_id", "answerable", "question", "refused",
              "retrieval_hit", "page_recall", "mrr", "n_citations",
-             *metric_keys, "latency_ms", "error"]
+             *metric_keys, "latency_ms", "prompt_tokens", "truncated", "error"]
         )
         for sample in payload["samples"]:
             retr = sample["retrieval"]
+            usage = sample.get("usage") or {}
             writer.writerow(
                 [
                     sample["id"],
@@ -137,6 +171,10 @@ def write_reports(out_dir: Path, payload: dict) -> dict[str, Path]:
                     len(sample["citations"]),
                     *[_csv_num(sample["scores"].get(key)) for key in metric_keys],
                     sample["latency_ms"],
+                    # 每题的输入 token 与截断标志：排成本、找异常长提示词
+                    # 都靠这两列，不必打开 samples.jsonl 逐个看。
+                    usage.get("prompt_tokens", ""),
+                    sample.get("truncated", False),
                     sample["error"],
                 ]
             )
@@ -174,6 +212,16 @@ def render_markdown(payload: dict) -> str:
         f"rerank_k={cfg.get('rerank_top_n')}，"
         f"重排={'开' if cfg.get('rerank_enabled') else '关'}"
     )
+    usage = payload.get("context_usage") or {}
+    if usage:
+        lines.append(
+            f"- 上下文：输入 token 均值 {usage['prompt_tokens_avg']}"
+            f"（证据 {usage['evidence_tokens_avg']} / 历史 {usage['history_tokens_avg']}），"
+            f"窗口利用率 {usage['utilization_avg']:.1%}，"
+            f"丢弃证据 {usage['dropped_evidence_total']} 条 / 历史 "
+            f"{usage['dropped_history_total']} 条，截断 {usage['truncated_total']} 题"
+            f"（计数策略 {usage['tokenizer']}）"
+        )
     lines.append(f"- 总耗时：{payload['duration_s']} 秒")
     lines.append("")
 

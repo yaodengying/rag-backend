@@ -121,6 +121,54 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_temperature: float = 0.2
     llm_timeout: int = 120
+    # 输出预留（skill 里的 R）：既作为 `max_tokens` 下发给模型，
+    # 也从上下文预算里先扣掉。不设它，答案被后端截断时系统完全不知情——
+    # 只有"空串"会被判成异常（见 infrastructure/llm.py）。
+    #
+    # 2048 的依据：skill 建议 R ≥ 2000；本机 7B 的答案实测在千字以内，
+    # 2048 token 足够，又不会把 8k 窗口吃掉一半以上。
+    llm_max_tokens: int = 2048
+    # 输出上限在请求体里的**字段名**。
+    #
+    # 为什么必须可配：langchain-openai 1.7 会把 `max_tokens` 参数改写成
+    # `max_completion_tokens`，而 Ollama / vLLM 的 OpenAI 兼容层只认
+    # `max_tokens`——实测（Ollama 0.40.5）传 `max_completion_tokens=8`
+    # 时限制被**完全忽略**：模型输出了 477 token，finish_reason 仍是 stop。
+    # 也就是说：不换字段名，输出预留等于没设，而且截断永远不会被标记。
+    #
+    # 本地后端（Ollama / vLLM / LM Studio）→ max_tokens
+    # OpenAI 云端较新的模型（o 系列等）→ max_completion_tokens
+    llm_max_tokens_field: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
+
+    # ---------- 上下文预算（见 rag/budget.py）----------
+    # **实际服务窗口**，不是界面/文档里的声明值：Ollama 要填它的 num_ctx，
+    # vLLM 要填 --max-model-len。填大了 → 提示词超窗，后端静默截断，
+    # 预算的全套计算跟着失效；填小了 → 证据被过度裁剪。
+    llm_context_window: int = 4096
+    # 证据占"窗口-输出预留-固定开销"的比例。skill：小窗口 4k~16k 取 0.4~0.45，
+    # 大窗口可到 0.6；0.5 是通用起点。
+    context_evidence_share: float = 0.5
+    # 安全余量（占剩余预算的比例）。tokenizer 近似、模板差异都靠它兜底。
+    context_margin_ratio: float = 0.05
+    # 每条证据的元数据开销（"[n] 来源：文件名 第N页" + 两个换行）。
+    # skill：20~40 token；10 条就是 240，装箱时不能忽略。
+    context_meta_tokens: int = 24
+    # 单条证据参与预算的最大字符数。必须与 prompts.format_context 的截断
+    # 口径一致，否则"按全文计数、按截断渲染"会让预算虚高。
+    context_snippet_limit: int = 1200
+    # 证据条数上限（skill 的 k_cap：单点事实 3~4、解释 6~8、对比 8~10，默认 12）。
+    # 预算够**不代表**所有碎片都该进：长上下文正中间的证据会被模型忽略
+    # （lost in the middle），多出来的条数还会按 token 线性推高成本。
+    context_max_evidence: int = 12
+    # token 计数策略：auto（本地 tokenizer → tiktoken → 字符估算）
+    # / tokenizer / tiktoken / chars。字符估算误差可达 30%，只应作为兜底。
+    token_estimator: Literal["auto", "tokenizer", "tiktoken", "chars"] = "auto"
+    # 本地 tokenizer 目录（如 Qwen2 的 tokenizer.json 所在目录）。
+    # 留空则 auto 走 tiktoken。**它应当与 LLM_MODEL 同源**，否则算的是别的模型。
+    tokenizer_path: str = ""
+    # 字符估算的换算系数。中文一 token 约 1.2~1.5 个汉字；
+    # 取 1.2 是刻意高估 token（宁可少装一条，也不要被后端截断）。
+    chars_per_token: float = 1.2
 
     # ---------- 检索 ----------
     # 每路召回的深度（稠密路与稀疏路各取这么多条），也是融合后送进重排的条数。
@@ -166,6 +214,19 @@ class Settings(BaseSettings):
     # 只有在"库很大、且已确认重排前候选被噪声挤爆"时才设，取值用
     # scripts/tune_retrieval.py 打印的真实分数分布来定。
     hybrid_bm25_min_score: float = 0.0
+    # 近重复判据（字符三元组 Jaccard）。0 = 关闭。
+    #
+    # 解决的是"同名不同内容才拦得住"之外的残余：另存过的 PDF、重新解析出
+    # 的同一段正文，字节不同但文本几乎一样——上传层的内容哈希拦不住它，
+    # 融合层的精确去重（文件名+正文）也拦不住（文件名可能变了）。
+    # 判定时**要求数字/型号完全一致**，所以「48 小时」与「24 小时」不会被误合并。
+    # 语料里出现"同一条款多个版本"时先调低到 0.9 观察，别直接关掉。
+    hybrid_near_dupe_ratio: float = 0.95
+    # 近重复合并的最小正文长度（折叠空白后计）。短于此长度的相同文本**不合并**：
+    # 「同一段公告」被两篇文档引用是合法的，只有成段复制才值得当作副本。
+    # 60 的取值：一句话以上的成段复制才合并；
+    # 更短的公告引用一律保留。
+    hybrid_near_dupe_min_chars: int = 60
 
     # ---------- 动态 k（自适应召回深度）----------
     # 每路召回深度怎么定：
@@ -466,6 +527,52 @@ class Settings(BaseSettings):
             )
         if not 0.0 <= self.llm_temperature <= 2.0:
             problems.append(f"LLM_TEMPERATURE 应落在 [0,2] — 当前 {self.llm_temperature}")
+        # 上下文预算：这里拦的是"参数组合自相矛盾"，
+        # 它们不会报错、只会让每次请求都拒答或都被截断。
+        if self.llm_max_tokens <= 0:
+            problems.append(
+                f"LLM_MAX_TOKENS 必须为正整数 — 当前 {self.llm_max_tokens}"
+                "（它是输出预留，也是下发给模型的 max_tokens）"
+            )
+        if self.llm_context_window <= 0:
+            problems.append(
+                f"LLM_CONTEXT_WINDOW 必须为正整数 — 当前 {self.llm_context_window}"
+                "（填**实际服务窗口**，如 Ollama 的 num_ctx）"
+            )
+        elif self.llm_max_tokens >= self.llm_context_window:
+            problems.append(
+                f"LLM_MAX_TOKENS({self.llm_max_tokens}) 必须小于 "
+                f"LLM_CONTEXT_WINDOW({self.llm_context_window})，"
+                "否则输出预留一扣就没有任何空间放证据"
+            )
+        if not 0.0 < self.context_evidence_share < 1.0:
+            problems.append(
+                f"CONTEXT_EVIDENCE_SHARE 应落在 (0,1) — 当前 {self.context_evidence_share}"
+            )
+        if not 0.0 <= self.context_margin_ratio < 1.0:
+            problems.append(
+                f"CONTEXT_MARGIN_RATIO 应落在 [0,1) — 当前 {self.context_margin_ratio}"
+            )
+        if self.context_meta_tokens < 0:
+            problems.append(
+                f"CONTEXT_META_TOKENS 不能为负 — 当前 {self.context_meta_tokens}"
+            )
+        if self.context_snippet_limit <= 0:
+            problems.append(
+                f"CONTEXT_SNIPPET_LIMIT 必须为正整数 — 当前 {self.context_snippet_limit}"
+            )
+        if self.context_max_evidence < 1:
+            problems.append(
+                f"CONTEXT_MAX_EVIDENCE 必须 >= 1 — 当前 {self.context_max_evidence}"
+            )
+        if self.chars_per_token <= 0:
+            problems.append(
+                f"CHARS_PER_TOKEN 必须为正数 — 当前 {self.chars_per_token}"
+            )
+        if self.tokenizer_path.strip() and not Path(self.tokenizer_path).is_dir():
+            problems.append(
+                f"TOKENIZER_PATH 不是有效目录 — {self.tokenizer_path}"
+            )
         for field, value in (
             ("HYBRID_VECTOR_WEIGHT", self.hybrid_vector_weight),
             ("HYBRID_BM25_WEIGHT", self.hybrid_bm25_weight),
@@ -478,6 +585,15 @@ class Settings(BaseSettings):
             problems.append(
                 f"HYBRID_BM25_MIN_SCORE 不能为负 — 当前 {self.hybrid_bm25_min_score}"
                 "（BM25 分非负，负阈值等于不设限）"
+            )
+        if not 0.0 <= self.hybrid_near_dupe_ratio <= 1.0:
+            problems.append(
+                f"HYBRID_NEAR_DUPE_RATIO 应落在 [0,1] — 当前 {self.hybrid_near_dupe_ratio}"
+                "（0 = 关闭近重复合并）"
+            )
+        if self.hybrid_near_dupe_min_chars < 0:
+            problems.append(
+                f"HYBRID_NEAR_DUPE_MIN_CHARS 不能为负 — 当前 {self.hybrid_near_dupe_min_chars}"
             )
         if self.hybrid_enabled and self.hybrid_vector_weight + self.hybrid_bm25_weight <= 0:
             problems.append(

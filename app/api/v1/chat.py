@@ -60,6 +60,7 @@ from app.schemas.chat import (
     ChatRequest,
     ChatResponse,
     CitationOut,
+    ContextUsageOut,
     GroundingOut,
     SourceOut,
 )
@@ -221,6 +222,8 @@ def _to_response(result: ChatResult) -> ChatResponse:
         retried=result.retried,
         query=result.query,
         conversation_id=result.conversation_id or None,
+        usage=ContextUsageOut(**result.usage) if result.usage else None,
+        truncated=result.truncated,
     )
 
 

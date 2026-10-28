@@ -43,11 +43,12 @@ from typing import TYPE_CHECKING
 
 from app.core.config import get_settings
 from app.core.exceptions import AppError, NotFoundError, UpstreamError
+from app.core.llm_state import is_truncated, reset_finish_reason
 from app.core.tracing import tracing_scope
 from app.domain.models import Answer, Citation, RetrievedChunk, StoredMessage
 from app.rag.grounding import STATUS_LOW, GroundingReport, audit_answer
 from app.rag.graph import NODE_REWRITE, route_after_rerank
-from app.rag.prompts import build_answer_prompts
+from app.rag.prompts import build_answer_prompts_planned
 from app.rag.rewrite import rewrite_query
 from app.rag.state import MAX_RETRY, NO_ANSWER_TEXT
 from app.rag.topk import RERANK_K_HARD_LIMIT, TOP_K_HARD_LIMIT, resolve_k
@@ -78,12 +79,22 @@ class ChatResult:
         grounding: 接地性核验报告；`None` = 本轮没有可核验的回答（拒答路径）。
             被 block 拦下时**不是** None——那份报告要留下来（`blocked=True`），
             否则运维分不清「被拦」与「真的没检索到」
+        usage: 上下文装箱用量（输入 token / 丢弃条数 / 利用率）；
+            拒答路径为 None（没调用模型，也就没有提示词）
+        truncated: 回答是否因达到输出上限被截断（finish_reason=length）；
+            True 时 `answer.text` 就是半句话
     """
 
     answer: Answer
     sources: list[RetrievedChunk] = field(default_factory=list)
     query: str = ""
     retried: bool = False
+    # 上下文装箱用量（输入 token、丢了几条、窗口利用率）。
+    # 拒答路径为 None：没有调用模型，也就没有提示词可算。
+    usage: dict | None = None
+    # 回答是否因达到输出上限被截断（finish_reason=length）。
+    # True 时 `answer.text` 就是半句话——调用方必须能看见，不能装作正常。
+    truncated: bool = False
     # 本轮归属的会话（未配置会话存储时为空串）。首问由服务端生成，
     # 经响应/`done` 事件回传给前端，此后每轮带上它，历史才归得了堆。
     conversation_id: str = ""
@@ -239,6 +250,9 @@ class ChatService:
         history = self._history_from_store(conversation_id, history)
 
         initial = self._initial_state(kb_id, question, history, top_k, rerank_k)
+        # 清空上一次的收尾原因：同一线程处理多个请求时，上一次的 length
+        # 不能残留下来把这次拒答标成"被截断"。
+        reset_finish_reason()
         final = self._graph.invoke(initial)
 
         ranked = list(final.get("ranked") or [])
@@ -290,6 +304,18 @@ class ChatService:
                 )
 
         warnings = list(report.warnings) if report is not None else []
+        usage = final.get("usage") or None
+        # 只有真的生成过才读收尾原因：拒答路径没有调用模型，
+        # 读到的只会是上一轮的残留（虽然前面 reset 过，双保险）。
+        truncated = (not refused) and is_truncated()
+        if truncated:
+            logger.warning(
+                "回答被输出上限截断（kb=%s 问题=%r）：答案是半句话，"
+                "请调大 LLM_MAX_TOKENS（当前 %s）",
+                kb_id,
+                question,
+                get_settings().llm_max_tokens,
+            )
         result = ChatResult(
             answer=Answer(text=text, citations=citations, refused=refused),
             sources=ranked,
@@ -298,6 +324,8 @@ class ChatService:
             conversation_id=conversation_id or "",
             grounding_warnings=warnings,
             grounding=report,
+            usage=usage,
+            truncated=truncated,
         )
         self._persist_turn(
             conversation_id, kb_id, question, text, refused,
@@ -306,7 +334,7 @@ class ChatService:
         )
         logger.info(
             "问答完成：kb=%s 会话=%s 问题=%r 查询=%r 候选=%s 上下文=%s 回答=%s 字 "
-            "拒答=%s 改写重试=%s 引用=%s",
+            "拒答=%s 改写重试=%s 引用=%s 输入token=%s 窗口利用率=%s 截断=%s",
             kb_id,
             conversation_id or "-",
             question,
@@ -317,6 +345,9 @@ class ChatService:
             refused,
             result.retried,
             len(citations),
+            (usage or {}).get("prompt_tokens", "-"),
+            (usage or {}).get("utilization", "-"),
+            truncated,
         )
         return result
 
@@ -480,6 +511,24 @@ class ChatService:
         # "到底拿什么去查的"。
         query = str(final.get("rewritten_question") or question)
 
+        # 先装箱、再推 sources：sources 与 citations 都应反映**实际送入模型**的
+        # 片段。预算丢掉的片段如果还出现在引用里，用户会看到"引用了但模型根本
+        # 没读过"——这比少给一条引用更糟。
+        plan = None
+        system = user = ""
+        if ranked:
+            try:
+                system, user, plan = build_answer_prompts_planned(
+                    ranked, question, history=history
+                )
+            except AppError as exc:
+                # 窗口/预留配置不匹配属于部署问题，必须给出明确 code，
+                # 而不是让 SSE 以"服务内部错误"收尾。
+                logger.warning("上下文预算失败：%s", exc)
+                yield {"type": "error", "detail": exc.message, "code": exc.code}
+                return
+            ranked = list(plan.evidence)
+
         yield {
             "type": "sources",
             "sources": [_source_dict(item) for item in ranked],
@@ -513,12 +562,13 @@ class ChatService:
         # 生成用**原始问题**，不是检索用的改写查询：改写是为了让索引更容易命中，
         # 而回答要面对的是用户真正问的那件事。两者混用会出现
         # "用户问巡检周期，回答却在讲设备巡检查询字符串"这类错位。
-        # 历史与非流式路径同源：都进 build_answer_prompts（check_conversations
-        # 第 1 组钉过"流式漏传历史"这个 bug，漏传时续聊变成单轮且无报错）。
-        system, user = build_answer_prompts(ranked, question, history=history)
+        # 历史与非流式路径同源：都进 build_answer_prompts_planned
+        # （check_conversations 第 1 组钉过"流式漏传历史"这个 bug）。
         if query != question:
             logger.info("流式问答：检索用了改写查询 %r（原始问题 %r）", query, question)
 
+        # 清空上一次的收尾原因，再开始生成；否则上一轮的 length 会残留。
+        reset_finish_reason()
         pieces: list[str] = []
         try:
             # LangSmith 追踪（未启用时 tracing_scope 返回 nullcontext，零开销）。
@@ -539,6 +589,15 @@ class ChatService:
 
         answer = "".join(pieces).strip()
         refused = NO_ANSWER_TEXT in answer
+        # 流式下 finish_reason 通常只在最后一个分片出现，适配器在迭代结束后
+        # 写回 contextvar。读不到（客户端中途断开）就是 False，不猜。
+        truncated = (not refused) and is_truncated()
+        if truncated:
+            logger.warning(
+                "流式回答被输出上限截断（kb=%s 问题=%r）：done 事件会带 truncated=true",
+                kb_id,
+                question,
+            )
         report = GroundingReport()
         if not refused:
             # 两条路径用**同一个** `_ground`，判据与文案不会分叉。
@@ -589,6 +648,8 @@ class ChatService:
             query=query,
             conversation_id=conversation_id,
             grounding=_grounding_dict(report),
+            usage=plan.as_usage() if plan is not None else None,
+            truncated=truncated,
         )
 
     # ---------- 内部 ----------
@@ -794,6 +855,8 @@ def _done_event(
     query: str,
     conversation_id: str | None = None,
     grounding: dict | None = None,
+    usage: dict | None = None,
+    truncated: bool = False,
 ) -> dict:
     """构造收尾的 `done` 事件。
 
@@ -812,6 +875,10 @@ def _done_event(
     `grounding` 同理恒在字段集里（未核验/拒答路径为 None）。流式下它是
     **唯一能告诉前端"这条回答不太可信"的通道**——token 已经推出去了，
     服务端没法把答案换成拒答话术，只能在这里标记。
+
+    `usage` / `truncated` 同样恒在：拒答路径为 None / false。它们回答的是
+    "这次提示词装了多少、回答有没有被截断"——只在日志里有的话，前端与评估
+    脚本都拿不到（skill rag-context-eval 把输入 token 列为系统层指标）。
     """
     return {
         "type": "done",
@@ -824,6 +891,10 @@ def _done_event(
         "query": query,
         "conversation_id": conversation_id,
         "grounding": grounding,
+        # 预算用量与截断标志恒在字段集里（拒答/未收集时为 null/false）：
+        # 前端只认"有没有这个键"，不要写"可能不存在"的第二分支。
+        "usage": usage,
+        "truncated": truncated,
     }
 
 

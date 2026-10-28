@@ -323,6 +323,13 @@ fusion_score(d) = Σ  w_path / (k + rank_path(d))        k = HYBRID_RRF_K（默�
   **去重必须发生在 `top_k` 截断之前**，名额才真的释放；计数进
   `RecallTrace.duplicates_removed`，否则"召回变好了"无从归因。
   只合并**同名文件**：两篇文档引用同一段公告是合法重复，按正文合并会抹掉一个真实来源。
+- **近重复也要合并，但必须带安全阀**（`HYBRID_NEAR_DUPE_RATIO=0.95`）：
+  另存过的 PDF、重新解析出的正文，字节不同但文本几乎一样——内容哈希拦不住，
+  精确去重也拦不住（文件名可能变了）。判据是字符三元组 Jaccard，
+  且必须同时满足：正文长度 ≥ `HYBRID_NEAR_DUPE_MIN_CHARS`（默认 60，更短的公告引用不合并）、
+  **数字/型号完全一致**（48 小时 ≠ 24 小时）、**否定词集合一致**（可以 ≠ 不可以）、**情态词集合一致**（应当 ≠ 可以）。
+  后两条是关键：没有它们，去重会静默删掉一条真实条款——相似度对"一字之差"几乎无感。
+  计数进 `RecallTrace.near_duplicates_removed`，与精确重复分开归因。
 - **错误语义**：`fuse_detailed` 用 `ValueError` 表达"某一路结果没按分数降序"。
   那是**上游违约**（Milvus 返回未排序结果），不是调用方传错参数，
   所以 `HybridRetriever._fuse()` 把它包成 `RetrievalError`（502）——

@@ -35,7 +35,7 @@ from typing import Any
 
 from app.core.config import get_settings
 from app.domain.ports import LLMPort, RerankerPort
-from app.rag.prompts import build_answer_prompts
+from app.rag.prompts import build_answer_prompts_planned
 from app.rag.retrieval import HybridRetriever
 from app.rag.rewrite import rewrite_query
 from app.rag.state import MAX_RETRY, NO_ANSWER_TEXT, RAGState
@@ -250,16 +250,30 @@ def make_generate_node(llm: LLMPort):
             logger.warning("生成节点收到空上下文，转为短路拒答")
             return refuse_node(state)
 
-        system, user = build_answer_prompts(ranked, question, history=state.get("history"))
+        system, user, plan = build_answer_prompts_planned(
+            ranked, question, history=state.get("history")
+        )
         answer = llm.generate(system, user).strip()
         refused = _is_refusal(answer)
         logger.info(
-            "生成完成：上下文 %s 条，回答 %s 字，refused=%s",
+            "生成完成：候选 %s 条 → 实际送入 %s 条（约 %s token，窗口利用率 %.1f%%），"
+            "回答 %s 字，refused=%s",
             len(ranked),
+            len(plan.evidence),
+            plan.prompt_tokens,
+            plan.utilization * 100,
             len(answer),
             refused,
         )
-        return {"answer": answer, "refused": refused}
+        # 回写 `ranked` 为**实际送入模型**的片段：预算丢掉的片段不应再出现在
+        # citations / sources 里（否则用户会看到"引用了但模型根本没读过"）。
+        # 拒答路径由条件边决定，不经过这里，所以不影响路由判据。
+        return {
+            "answer": answer,
+            "refused": refused,
+            "usage": plan.as_usage(),
+            "ranked": list(plan.evidence),
+        }
 
     return generate
 

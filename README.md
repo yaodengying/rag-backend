@@ -381,9 +381,16 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"   # 生成 AUTH_SEC
 | `RETRIEVE_TOP_K` | 8 | 库很大想提高召回可到 12~16；**小于 6 会明显掉 MRR**（实测 2→0.9167、4→0.9583） |
 | `RETRIEVE_K_MODE` | `fixed` | `adaptive` 时先取 `min(top_k, RETRIEVE_K_MAX)` 条，再按每路分数的断层收缩到 `[RETRIEVE_K_MIN, 上限]`；不传 `top_k` 的请求现在真的走配置（旧版被 schema 写死的 8/4 挡住了）。改之前先看 `scripts/tune_retrieval.py` 的分数分布并重跑评估 |
 | `RERANK_TOP_N` | 4 | 上下文纯度 vs 覆盖面的权衡；7B 下 4 条已够 |
+| `LLM_MAX_TOKENS` | 2048 | 输出预留，同时作为输出上限下发。答案被截断时响应/done 带 `truncated=true`，**不会静默返回半句话** |
+| `LLM_MAX_TOKENS_FIELD` | `max_tokens` | 输出上限的字段名。langchain 会把 `max_tokens` 改写成 `max_completion_tokens`，而 Ollama/vLLM 只认前者（实测后者被完全忽略）——项目用 `extra_body` 原样下发。OpenAI 云端较新模型改 `max_completion_tokens` |
+| `LLM_CONTEXT_WINDOW` | 8192 | **实际服务窗口**（Ollama 的 `num_ctx`、vLLM 的 `--max-model-len`）。填成界面声明值会让整套预算算错；部署后用 `scripts/check_context_window.py --load` 核对（不一致会打印两种改法） |
+| `CONTEXT_EVIDENCE_SHARE` | 0.5 | 证据占"窗口−输出预留−固定开销"的比例；小窗口 4k~16k 取 0.4~0.45 |
+| `CONTEXT_MAX_EVIDENCE` | 12 | 证据条数上限（skill 的 `k_cap`）。预算够也不把 20 条碎片全塞进去——中段证据会被忽略，成本却按条线性涨 |
+| `TOKEN_ESTIMATOR` | `auto` | `auto`/`tokenizer`/`tiktoken`/`chars`。字符估算误差可达 30%，只作兜底；离线环境可设 `chars` 免去首次加载 |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | 300 / 50 | 中文建议 150~300，**500 实测掉分** |
 | `HYBRID_VECTOR_WEIGHT` / `HYBRID_BM25_WEIGHT` | 0.5 / 0.5 | 只有比值有意义；0.7/0.3 实测略差 |
 | `HYBRID_DENSE_MIN_SIMILARITY` | 0.0 | 不要盲目调高，理由见 3.8 |
+| `HYBRID_NEAR_DUPE_RATIO` | 0.95 | 近重复合并（另存过的 PDF 等）。数字/否定词/情态词不同的片段**不会**合并；0 = 关闭。配套 `HYBRID_NEAR_DUPE_MIN_CHARS=60` 保护短公告引用 |
 | `CHAT_STREAM_RETRY_DEFAULT` | false | 想让"首轮没找到"自动多花 2~4 秒改写就设 true |
 | `GROUNDING_ACTION` | `flag` | 接地性核验的三档动作：`off` / `flag`（只标记）/ `block`（非流式下低置信换成拒答）。`block` 会推高拒答率，属产品取舍，开之前先读 [docs/anti-hallucination.md](docs/anti-hallucination.md) |
 | `RERANK_MIN_TOP_SCORE` | 0.0 | 整批最高分闸门，0 = 关。要开**必须先用 `scripts/probe_rerank_gap.py` 量分离度**，别照抄别人的数字（logits 尺度随模型/语料漂） |
@@ -975,7 +982,7 @@ RAGAS 的正确装法（**不要** `pip install ragas`，它会把 `openai` 与 
 
 ---
 
-## 附录 A. 自检清单（1066 项断言）
+## 附录 A. 自检清单（1078 项断言）
 
 > 为什么是**独立脚本**而不是 pytest：每个脚本都能单独跑、依赖各不相同（有的要 Milvus，
 > 有的要 BGE 权重），失败时直接退出码 1，不需要装 pytest 插件、也不要求 CI。
@@ -988,13 +995,14 @@ RAGAS 的正确装法（**不要** `pip install ragas`，它会把 `openai` 与 
 .\.venv\Scripts\python.exe scripts\check_models.py         #  23
 .\.venv\Scripts\python.exe scripts\check_embedding.py      #  63
 .\.venv\Scripts\python.exe scripts\check_vectorstore.py    #  84  ← 需 Milvus
-.\.venv\Scripts\python.exe scripts\check_retrieval.py      # 128  ← 需 Milvus
+.\.venv\Scripts\python.exe scripts\check_retrieval.py      # 133  ← 需 Milvus
 .\.venv\Scripts\python.exe scripts\check_ingest.py         #  59
-.\.venv\Scripts\python.exe scripts\check_filesafety.py     #  39
+.\.venv\Scripts\python.exe scripts\check_filesafety.py     #  43
 .\.venv\Scripts\python.exe scripts\check_grounding.py      #  45
-.\.venv\Scripts\python.exe scripts\check_chat.py           # 246
+.\.venv\Scripts\python.exe scripts\check_chat.py           # 249
 .\.venv\Scripts\python.exe scripts\check_auth.py           # 130
 .\.venv\Scripts\python.exe scripts\check_conversations.py  #  53  ← 第 3 组需 Redis
+.\.venv\Scripts\python.exe scripts\check_context_budget.py #  43
 .\.venv\Scripts\python.exe scripts\check_eval.py           #  57
 ```
 
@@ -1012,6 +1020,7 @@ RAGAS 的正确装法（**不要** `pip install ragas`，它会把 `openai` 与 
 | `check_chat` | 提示词口径、路由三分支、图四条路径、引用映射、LLM 错误映射、SSE 事件序、接地性审计 | 无（全假上游） |
 | `check_auth` | 哈希自描述、令牌签发/验签、防账号枚举、注册开关、**白名单外每条路由都挂了鉴权** | 无 |
 | `check_conversations` | 键设计与 TTL 续期、历史进提示词、落库两轮、503 语义 | Redis（第 3 组） |
+| `check_context_budget` | 预算公式（A=W−R−F）、历史/证据装箱、元数据开销、溢出降级、`ContextWindowExceeded`、默认配置下提示词逐字节不变、`finish_reason=length` 截断检测 | 无 |
 | `check_eval` | 页码标签解析、命中判定（文件名对但页码错**不算**命中）、聚合口径 | 无 |
 
 ### 附录 A.1 工具脚本（不是自检）
@@ -1022,6 +1031,7 @@ RAGAS 的正确装法（**不要** `pip install ragas`，它会把 `openai` 与 
 | `scripts/ask.py` | 命令行问答（`--demo` 走服务函数、不带 `--demo` 走 HTTP） | 服务在跑 |
 | `scripts/evaluate_rag.py` | RAGAS 四指标 + 自算页码级命中/MRR | 服务 + LLM |
 | `scripts/probe_rerank_gap.py` | 量正/负样本的重排分间隔，给 `RERANK_MIN_TOP_SCORE` 标定 | Milvus + BGE |
+| `scripts/check_context_window.py` | 部署对齐检查：窗口（Ollama 读 `/api/ps` 的 `context_length`）+ **输出上限实测**（发一次 8 token 生成，看后端是否真的执行）；不一致时打印改法 | LLM 服务在跑 |
 | `scripts/backup.py` / `rebuild_vectors.py` | 备份/恢复/校验、从 uploads 重算向量 | 见 `docs/backup.md` |
 
 ## 附录 B. 接口一览

@@ -603,6 +603,73 @@ def check_fusion_dedupe() -> None:
         fuse_detailed(spaced, []).duplicates_removed == 1,
     )
 
+    # ---- 近重复（另存过的 PDF / 重新解析）：跨文件名、长文本才合并 ----
+    near_base = (
+        "客服须在48小时内首次响应客户工单，超时未处理的工单自动升级至值班主管，"
+        "并同步到工单系统与值班群，升级后仍需在两小时内给出处理方案，"
+        "值班主管未在时限内响应时继续上报至部门负责人。"
+    )
+    near_copies = [
+        _dup("n1", near_base, filename="甲.txt", doc_id="doc-1", vector=0.80),
+        _dup("n2", near_base, filename="乙.txt", doc_id="doc-2", vector=0.70),
+    ]
+    near_result = fuse_detailed(
+        near_copies, [], near_dupe_ratio=0.95, near_dupe_min_chars=40
+    )
+    check(
+        "跨文件的长文本近重复会合并（另存过的 PDF 场景）",
+        [i.chunk.id for i in near_result.items] == ["n1"]
+        and near_result.near_duplicates_removed == 1,
+        f"{[i.chunk.id for i in near_result.items]} "
+        f"near={near_result.near_duplicates_removed}",
+    )
+    digit_variant = [
+        _dup("n1", near_base, filename="甲.txt", doc_id="doc-1", vector=0.80),
+        _dup("n2", near_base.replace("48", "24"), filename="乙.txt", doc_id="doc-2", vector=0.70),
+    ]
+    digit_result = fuse_detailed(
+        digit_variant, [], near_dupe_ratio=0.95, near_dupe_min_chars=40
+    )
+    check(
+        "数字不同不合并（48 小时 vs 24 小时不是重复）",
+        len(digit_result.items) == 2 and digit_result.near_duplicates_removed == 0,
+        f"{[i.chunk.id for i in digit_result.items]}",
+    )
+    negation_variant = [
+        _dup("g1", "工单可以加急处理，但需主管审批。", vector=0.8),
+        _dup("g2", "工单不可以加急处理，但需主管审批。", vector=0.7),
+    ]
+    negation_result = fuse_detailed(
+        negation_variant, [], near_dupe_ratio=0.95, near_dupe_min_chars=0
+    )
+    check(
+        "否定词不同不合并（可以 vs 不可以不是重复）",
+        len(negation_result.items) == 2
+        and negation_result.near_duplicates_removed == 0,
+        f"{[i.chunk.id for i in negation_result.items]}",
+    )
+    modality_variant = [
+        _dup("m1", "员工应当在24小时内提交申请，并由直属主管审批后生效。", vector=0.8),
+        _dup("m2", "员工可以在24小时内提交申请，并由直属主管审批后生效。", vector=0.7),
+    ]
+    modality_result = fuse_detailed(
+        modality_variant, [], near_dupe_ratio=0.95, near_dupe_min_chars=0
+    )
+    check(
+        "情态词不同不合并（应当 vs 可以不是重复）",
+        len(modality_result.items) == 2
+        and modality_result.near_duplicates_removed == 0,
+        f"{[i.chunk.id for i in modality_result.items]}",
+    )
+    short_result = fuse_detailed(
+        cross_file, [], near_dupe_ratio=0.95, near_dupe_min_chars=120
+    )
+    check(
+        "短文本不参与近重复合并（合法引用必须保留）",
+        len(short_result.items) == 2 and short_result.near_duplicates_removed == 0,
+        f"条数={len(short_result.items)}",
+    )
+
     blanks = [_dup("e1", "", vector=0.9), _dup("e2", "", vector=0.8)]
     check(
         "空正文不参与去重（无法判断是否同内容，各自保留）",

@@ -75,7 +75,9 @@
 
 from __future__ import annotations
 
+from app.core.config import get_settings
 from app.domain.models import RetrievedChunk
+from app.rag.budget import ContextPlan, clip_for_prompt, plan_context
 from app.rag.state import NO_ANSWER_TEXT
 
 # -----------------------------------------------------------------------------
@@ -136,18 +138,21 @@ REWRITE_USER = """原始问题：{question}
 # 单条资料正文的截断长度。重排后的 top_n 通常 4 条，
 # 每条 300 字左右的知识库语料拼起来约 1~2k 字，远在 qwen2:7b 的上下文内；
 # 这里截断是防止误配超大 CHUNK_SIZE 时把上下文撑爆。
+# **必须与 `CONTEXT_SNIPPET_LIMIT` 同源**：预算按这个长度计 token，
+# 渲染却按另一个长度截断时，预算会系统性偏高或偏低。
 _DEFAULT_SNIPPET_LIMIT = 1200
 
 
 def format_context(
     chunks: list[RetrievedChunk],
-    snippet_limit: int = _DEFAULT_SNIPPET_LIMIT,
+    snippet_limit: int | None = None,
 ) -> str:
     """把检索到的片段拼成参考资料块，并附上来源标注。
 
     Args:
         chunks: RetrievedChunk 列表，通常已按相关性降序
-        snippet_limit: 单条正文的截断字符数
+        snippet_limit: 单条正文的截断字符数；None 时取
+            `settings.context_snippet_limit`（与预算计数同源）
 
     Returns:
         形如「[1] 来源：手册.pptx 第3页\\n正文…」再用空行拼接的字符串；
@@ -166,12 +171,17 @@ def format_context(
         # 模型看到的是格式正常的提示词，更容易自由发挥。
         return "（无）"
 
+    limit = int(
+        get_settings().context_snippet_limit
+        if snippet_limit is None
+        else snippet_limit
+    )
     blocks: list[str] = []
     for index, item in enumerate(chunks, start=1):
         chunk = item.chunk if isinstance(item, RetrievedChunk) else item
-        text = (chunk.text or "").strip()
-        if len(text) > snippet_limit:
-            text = text[:snippet_limit] + "…"
+        # 与预算计数用**同一个**裁剪函数：按头 60% + 尾 40% 保留，
+        # 块被切得很长时不会把段尾的结论整段丢掉。
+        text = clip_for_prompt((chunk.text or "").strip(), limit)
 
         location = chunk.page_label or "页码未知"
         filename = (chunk.filename or "").strip() or "未知文件"
@@ -210,6 +220,8 @@ def build_answer_prompts(
     chunks: list[RetrievedChunk],
     question: str,
     history: list[dict[str, str]] | None = None,
+    *,
+    plan: ContextPlan | None = None,
 ) -> tuple[str, str]:
     """组装回答阶段的 (system, user) 两条提示词。
 
@@ -218,16 +230,43 @@ def build_answer_prompts(
 
     Args:
         history: 多轮历史 [{role, content}]（最新的在后）。
-            会话链路从 Redis 读；无会话时为 None，提示词与从前完全一致。
+            会话链路从 Redis 读；无会话时为 None。
+        plan: 上下文装箱结果。**传了就用它**（证据与历史都取自 plan），
+            用来避免"服务层算过一次 token、这里再算一次"；不传则现场
+            按 `CONTEXT_*` 预算装箱——两条路径的装箱逻辑因此只有一份。
+
+    说明：装箱只会**少放**，不会改动片段顺序或文字；默认配置下
+    （4 条 × 300 字）远未触及预算，提示词与引入预算之前逐字节一致。
     """
+    if plan is None:
+        plan = plan_context(chunks, history, question, system_prompt=ANSWER_SYSTEM)
     return (
         ANSWER_SYSTEM,
         ANSWER_USER.format(
-            context=format_context(chunks),
-            history_block=build_history_block(history),
+            context=format_context(plan.evidence),
+            history_block=build_history_block(plan.history),
             question=question,
             no_answer=NO_ANSWER_TEXT,
         ),
+    )
+
+
+def build_answer_prompts_planned(
+    chunks: list[RetrievedChunk],
+    question: str,
+    history: list[dict[str, str]] | None = None,
+) -> tuple[str, str, ContextPlan]:
+    """同 `build_answer_prompts`，但把装箱结果一并返回。
+
+    给节点/服务层用来上报 `usage`（输入 token、丢了几条、利用率）。
+    拆成函数而不是让调用方"先 plan 再 build"：那样两个调用点都要记得
+    把 plan 传回去，漏传时装箱会做两遍——而两遍之间如果配置被改过，
+    日志里的用量与真实提示词就对不上了。
+    """
+    plan = plan_context(chunks, history, question, system_prompt=ANSWER_SYSTEM)
+    return (
+        *build_answer_prompts(chunks, question, history=history, plan=plan),
+        plan,
     )
 
 

@@ -55,6 +55,35 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # 2. 启动期自检：配置缺项、模型目录、数值区间
     settings.validate_runtime()
 
+    # 2.1 上下文预算画像。窗口/预留填错时，后面**每一问**都会跟着错，
+    #     启动时打一行比等"回答被截断/证据变少"再回头查便宜得多。
+    logger.info(
+        "上下文预算：窗口=%s 输出预留=%s 证据份额=%s 安全余量=%s 计数策略=%s",
+        settings.llm_context_window,
+        settings.llm_max_tokens,
+        settings.context_evidence_share,
+        settings.context_margin_ratio,
+        settings.token_estimator,
+    )
+    if settings.context_evidence_share > 0.7:
+        logger.warning(
+            "CONTEXT_EVIDENCE_SHARE=%.2f 偏高（skill 建议 0.4~0.6）："
+            "历史会被压到几乎没有，长上下文还会 lost in the middle。"
+            "想提高召回覆盖，优先调 CONTEXT_MAX_EVIDENCE 而不是占满窗口。",
+            settings.context_evidence_share,
+        )
+    # 窗口是**唯一**能让整套预算静默失效的配置：没在 .env 里显式写过时，
+    # 它取的是类默认值，而你很容易忘了模型服务实际给的是另一个数
+    # （本机实测 Ollama 默认 4096，而默认值写的是 8192）。
+    if "llm_context_window" not in settings.model_fields_set:
+        logger.warning(
+            "LLM_CONTEXT_WINDOW 用的是类默认值 %s（.env / 环境变量里没有这一项）。"
+            "它必须等于模型服务的**实际**窗口，部署后请运行 "
+            "scripts/check_context_window.py --load 核对；不一致时提示词会被"
+            "后端从中间静默截断。",
+            settings.llm_context_window,
+        )
+
     # 2.5 链路追踪（可选）。必须在业务模块**之前**装配：
     #     configure_tracing 把配置写进环境变量，而 langsmith SDK 在
     #     第一次建 tracer 时读环境变量——晚于第一次问答就晚了。

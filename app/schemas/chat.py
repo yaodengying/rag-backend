@@ -129,6 +129,33 @@ class ChatRequest(BaseModel):
     )
 
 
+class ContextUsageOut(BaseModel):
+    """一次问答的上下文用量（预算装了多少、丢了多少、利用率）。
+
+    为什么把它暴露给调用方而不是只打日志：
+        skill（rag-context-eval）把"每请求输入 token / 上下文利用率 /
+        压缩触发率"列为系统层指标。只在日志里的话，前端与评估脚本都拿不到，
+        容量问题就只能等用户投诉"回答变短了"才发现。
+    """
+
+    window: int = Field(0, description="配置的窗口（LLM_CONTEXT_WINDOW，应为实际服务窗口）")
+    output_reserve: int = Field(0, description="输出预留（LLM_MAX_TOKENS）")
+    prompt_tokens: int = Field(0, description="提示词总 token（固定开销 + 证据 + 历史）")
+    fixed_tokens: int = Field(0, description="系统提示 + 问题 + 模板的固定开销")
+    evidence_tokens: int = Field(0, description="证据占用 token")
+    history_tokens: int = Field(0, description="历史占用 token")
+    evidence_count: int = Field(0, description="实际送入模型的片段数")
+    dropped_evidence: int = Field(0, description="因预算被丢弃的证据条数")
+    dropped_history: int = Field(0, description="因预算被丢弃的历史条数")
+    utilization: float = Field(
+        0.0,
+        description="提示词 token / 窗口。长期 < 40% 说明预算分配过保守；接近 1 说明临界",
+    )
+    tokenizer: str = Field(
+        "", description="token 计数策略：tokenizer（本地词表）/ tiktoken（近似）/ chars（估算）"
+    )
+
+
 class ChatResponse(BaseModel):
     """问答响应。"""
 
@@ -158,6 +185,16 @@ class ChatResponse(BaseModel):
             "null 表示本轮没有可核验的回答（拒答路径）。"
             "流式接口把它放在 done 事件里——token 已经发出，服务端收不回来，"
             "只能如实标记"
+        ),
+    )
+    usage: ContextUsageOut | None = Field(
+        None, description="上下文用量（输入 token、丢了几条、利用率）；拒答路径为 null"
+    )
+    truncated: bool = Field(
+        False,
+        description=(
+            "回答是否因达到输出上限（LLM_MAX_TOKENS）被截断。"
+            "true 时 answer 就是半句话，前端应提示「回答可能不完整」"
         ),
     )
 

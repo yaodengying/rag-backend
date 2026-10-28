@@ -890,6 +890,10 @@ def check_chat_service() -> None:
     check("ask：引用带摘要", "报销" in citation.snippet)
     check("ask：query 回填为实际检索用的查询", result.query == case.question)
     check("ask：未触发改写", result.retried is False)
+    check("ask：带回上下文用量（输入 token / 利用率）",
+          bool(result.usage) and result.usage.get("prompt_tokens", 0) > 0,
+          str(result.usage))
+    check("ask：正常回答不会被标成截断", result.truncated is False)
 
     service, case = _service(empty_kb=True)
     refused = service.ask(case.kb_id, case.question)
@@ -897,6 +901,7 @@ def check_chat_service() -> None:
     check("拒答时 citations 为空（不作无依据的引用）", refused.answer.citations == [])
     check("拒答时 sources 为空（库里确实什么都没有）", refused.sources == [])
     check("拒答时 text 为固定话术", refused.answer.text == NO_ANSWER_TEXT)
+    check("拒答路径没有调用模型 → usage 为 None", refused.usage is None, str(refused.usage))
 
     service, case = _service(drop_first=1)
     retried = service.ask(case.kb_id, case.question)
@@ -1895,9 +1900,11 @@ async def _retry_choice_cases() -> None:
         崩掉，整套自检就从"跑失败"退化成"跑不到"——后者更难发现，因为输出里
         既没有 FAIL 也没有汇总行。变异实验第一版正是被这个假象骗过。
         """
-        missing = sorted({"retried", "attempts", "can_retry", "query"} - set(done))
+        missing = sorted(
+            {"retried", "attempts", "can_retry", "query", "usage", "truncated"} - set(done)
+        )
         check(
-            f"done 字段齐全（{label}）：retried / attempts / can_retry / query",
+            f"done 字段齐全（{label}）：retried / attempts / can_retry / query / usage / truncated",
             not missing,
             f"缺少 {missing}",
         )
