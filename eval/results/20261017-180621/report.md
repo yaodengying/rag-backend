@@ -1,7 +1,7 @@
 # RAG 评估报告（RAGAS）
 
 - 生成时间：2026-10-17 18:10:44
-- 数据集：`H:\work\rag-backend\eval\dataset\qa_dataset.jsonl`（18 题 = 16 可答 + 2 应拒答）
+- 数据集：`eval/dataset/qa_dataset.jsonl`（18 题 = 16 可答 + 2 应拒答）
 - 裁判模型：`qwen2:7b` @ `http://127.0.0.1:11434/v1`
 - 向量模型：`bge-large-zh-v1.5`（cpu）
 - 检索配置：top_k=8，rerank_k=4，重排=开

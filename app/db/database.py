@@ -8,7 +8,7 @@
       但 FastAPI 的同步依赖会在线程池中执行，务必确保每次请求用独立 session。
 
 实现说明：
-    - 连接串用**绝对路径**拼装（`sqlite:///H:/.../data/rag.db`），
+    - 连接串用**绝对路径**拼装（`sqlite:///<项目根>/data/rag.db`），
       避免同一个库因为 cwd 不同而落成两个文件。
     - 打开 `foreign_keys=ON`：SQLite 默认**不**执行外键约束，
       不显式打开的话 `documents.kb_id` 上的 CASCADE 形同虚设。

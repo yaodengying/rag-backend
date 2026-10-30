@@ -148,7 +148,7 @@ def make_rerank_node(reranker: RerankerPort | None):
 
         ranked = reranker.rerank(query, candidates, top_n=keep)
 
-        # 「整批最高分」闸门（默认关闭，RERANK_MIN_TOP_SCORE=0）。
+        # 「整批最高分」闸门（未配置 RERANK_MIN_TOP_SCORE 时关闭）。
         #
         # 逐条闸门（RERANK_MIN_SCORE）只挡负分，挡不住这一类：
         # 问题与某个片段**字面高度重叠但语义不匹配**（问"备件能加急吗"，
@@ -158,8 +158,8 @@ def make_rerank_node(reranker: RerankerPort | None):
         #
         # 注意只在 reranker 真的给了分数时才判：reranker=None 时分数全 None，
         # 这里若照判会把所有请求都拒掉。
-        floor = float(get_settings().rerank_min_top_score)
-        if floor > 0 and ranked:
+        floor = get_settings().rerank_min_top_score
+        if floor is not None and ranked:
             top = max(
                 (item.rerank_score for item in ranked if item.rerank_score is not None),
                 default=None,

@@ -65,7 +65,7 @@
     条数较多时按累计量打进度日志：CPU 上编码上万块要几分钟，
     日志里不该是一片空白。
 
-维度自检（本机实测 H:\\models\\bge-large-zh-v1.5，CPU，FlagEmbedding 1.4.2）：
+维度自检（本机实测 <models-dir>\bge-large-zh-v1.5，CPU，FlagEmbedding 1.4.2）：
     config.json 声明 hidden_size=1024，与 MILVUS_DIMENSION 一致；
     输出 1024 维；normalize_embeddings=True 后 L2 范数 = 1.0；
     「哪个是向量数据库？」对 Milvus 段落 0.591 / FAISS 段落 0.463 / 食堂段落 0.032
@@ -480,7 +480,7 @@ class BgeEmbedder:
             return FlagAutoModel.from_finetuned(self._model_path, **options)
         except ValueError as exc:
             # FlagAutoModel 靠**目录名**查官方映射表来决定池化方式与指令模板；
-            # 微调后另存为自定义目录名（如 H:\models\my-bge-ft）就查不到。
+            # 微调后另存为自定义目录名（如 <models-dir>\my-bge-ft）就查不到。
             # 此时显式声明为编码器型 BGE，行为与原 sentence-transformers 一致。
             logger.warning(
                 "模型目录名不在 FlagEmbedding 官方映射表内，按编码器型 BGE 加载：%s（%s）",

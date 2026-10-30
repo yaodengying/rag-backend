@@ -11,13 +11,16 @@
 实现要点：
     1. 只对向量检索召回的 top_k（约 8~50 条）做重排，不要对全库做。
     2. **分数尺度：统一用原始 logits**（本机 bge-reranker-base 实测，
-       FlagEmbedding 1.4.2 / CPU）：
+       FlagEmbedding CPU）：
          - `FlagReranker.compute_score(pairs)` 的 `normalize` 默认就是 **False**，
-           返回未经 Sigmoid 的原始 logits（实测相关对 +5.16 / 无关对 -10.19）；
-         - 传 `normalize=True` 才套 Sigmoid 得到 [0,1] 概率（实测 0.994 / 0.00004）。
-       本项目统一按**原始 logits** 处理，因此 min_score 按 logits 尺度设：
-       0.0 即可（实测正负样本相差约 15）。
-       切勿把 normalize=True 的输出当 logits——那会把阈值语义完全弄反。
+           返回未经 Sigmoid 的原始 logits；
+         - 传 `normalize=True` 才套 Sigmoid 得到 [0,1] 概率。
+       本项目统一按**原始 logits** 处理，因此 min_score 按 logits 尺度设。
+       **注意 min_score 不能想当然设 0**：相关对的 logits 并不保证为正——
+       简历语料实测相关对 [-4.5, +4.3]、无关对 [-10.2, -6.2]（2026-10-28，
+       "面试人姓名/年龄" 这类短查询的相关片段只有 -1 左右），用 0.0 会把
+       全部相关片段滤掉，表现为「库里有资料却拒答」。当前取 -5.0（.env），
+       换语料或换模型后必须用真实查询重新校准。
     3. CPU 上同样禁止 fp16（同 embedding.py 的坑）。
        FlagReranker 的 use_fp16 默认已是 False，本项目仍按设备显式传入并加 dtype 兜底。
     4. 与 LLM 不同，重排必须本地加载权重——Ollama 不提供重排接口
@@ -33,6 +36,15 @@
        三类必须拦下：前向异常（OOM/权重损坏）、分数条数与候选数不一致
        （会让候选与分数张冠李戴）、分数含 NaN（NaN 与任何阈值比较都是 False，
        会把**全部**候选静默丢光，最终表现为"库里明明有资料却拒答"）。
+
+    7. **过滤是「绝对下限 + 相对落差」双条件**（`RERANK_RELATIVE_MARGIN`）：
+       绝对下限 `RERANK_MIN_SCORE` 回答"这一批够不够格回答"——全批低于它就
+       返回空、上层拒答；相对落差 `max(下限, 最高分 - margin)` 回答"谁能跟
+       最高分一起进上下文"——把明显陪跑的片段去掉，避免 top_n 名额被平庸项
+       占满。只看绝对值的坏处是：换模型/换语料就得重新标一个数，而"差多少"
+       这个口径能跟着本批分数自动平移。
+       两条约束不能互相替代：只留相对值时，整批都很差仍会挑出"相对最好"的
+       一条硬答；只留绝对下限时，一批平庸分（但都高过下限）会全量进上下文。
 """
 
 from __future__ import annotations
@@ -86,6 +98,8 @@ class BgeReranker:
         self._device = (device or settings.rerank_device or "cpu").lower()
         self._max_length = int(max_length)
         self._min_score = float(settings.rerank_min_score)
+        # 相对落差（0 = 关闭），见模块文档第 7 条
+        self._relative_margin = float(settings.rerank_relative_margin)
         # CPU 必须 fp32（见模块文档第 3 条）
         self._use_fp16 = not _is_cpu(self._device)
 
@@ -134,8 +148,23 @@ class BgeReranker:
                 "会把全部候选静默过滤掉（表现为「有资料却拒答」）；"
                 "请检查权重完整性与输入文本是否含异常字符"
             )
+        # 双条件门槛（详见模块文档第 7 条）：
+        #   绝对下限 threshold 决定"够不够格回答"（全批不够格 → 空 → 拒答）；
+        #   相对落差 margin 决定"够不够格跟最高分并列进上下文"（去掉陪跑项）。
+        # margin<=0 时退化为纯绝对阈值，行为与旧版完全一致。
+        effective = threshold
+        if self._relative_margin > 0:
+            top = max(score for _, score in scored)
+            effective = max(threshold, top - self._relative_margin)
+            logger.debug(
+                "重排门槛：绝对 %.3f / 最高 %.3f / 落差 %.3f → 生效 %.3f",
+                threshold,
+                top,
+                self._relative_margin,
+                effective,
+            )
         # 先按分数过滤无关项，再截断——否则低分项会占掉 top_n 名额
-        kept = [item for item in scored if item[1] >= threshold]
+        kept = [item for item in scored if item[1] >= effective]
         kept.sort(key=lambda item: item[1], reverse=True)
 
         result: list[RetrievedChunk] = []

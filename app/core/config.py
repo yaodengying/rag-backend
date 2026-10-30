@@ -30,6 +30,7 @@
 
 from __future__ import annotations
 
+import math
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -99,19 +100,32 @@ class Settings(BaseSettings):
     # 勉强及格的片段去生成。
     #
     # 为什么与 RERANK_MIN_SCORE 是两回事：
-    #   RERANK_MIN_SCORE 是**逐条**过滤，闸门设在 0.0 时它只挡负分；
-    #   但"主题相邻、答案没有"的问题，重排常给出**正分**（字面重叠多、
-    #   语义不匹配），逐条闸门放它过去，模型就会拿一段周边规则硬答。
-    #   实测本机语料（3 篇文档、18 题）：
-    #     可答题 top1 重排分 1.797 ~ 8.563（最低 q14）
-    #     硬负样本「备件发货可以加急吗？」top1 = 1.048（召回到备件发货那页，
-    #       但那页没写加急）—— 7 个其它负样本直接零召回，被 0.0 逐条闸门挡住
-    #   即：**负样本落在正分区间**是真实存在的，只是样本太少不足以定死阈值。
+    #   RERANK_MIN_SCORE 是**逐条**过滤；整批闸门问的是"这一批里最好的
+    #   那条够不够格"。一批都很平庸时逐条闸门会放过一堆陪跑片段，
+    #   而整批闸门能一次性判"这轮检索不对题"。
     #
-    # 默认 0.0 = 关闭。要开就在自己的语料上先量分离度
-    # （scripts/probe_rerank_gap.py），别照抄别人的数字：
-    # 交叉编码器的 logits 尺度随模型与语料变化，本机 bge-reranker-base 的地板约 -10.2。
-    rerank_min_top_score: float = 0.0
+    # **None = 关闭**（不是 0）。用 0 当开关是错的：logits 本来就可正可负，
+    # 0 是一个合法阈值（"最高分为负就拒答"），既当开关又当阈值会分不清。
+    # 负值同样合法 —— bge-reranker-base 的地板约 -10.2，-4.5 这样的负阈值
+    # 能拦住"最高分 -6.0"的整批，这在旧实现里被误判为"永远不触发"。
+    #
+    # 本机简历语料实测（8 正 / 6 负，2026-10-28）：
+    #   正样本最高分 -2.88 ~ +3.08；负样本最高分 -7.98 ~ -2.17
+    #   两组**区间重叠**（负样本 "面试人期望什么时候入职" -2.17 高于最弱正样本
+    #   -2.88），所以这个闸门在当前语料上只能当**粗闸门**用：取 -4.5 只拦
+    #   "年假/天气/离职"这类明显不对题，不指望它精确分正负。
+    # 换语料或换模型必须用 scripts/probe_rerank_gap.py 重标，别照抄。
+    rerank_min_top_score: float | None = None
+
+    # 相对落差闸门：逐条门槛取 max(rerank_min_score, 本批最高分 - 本值)。
+    # 存在的理由见 README「重排阈值策略」：单一绝对阈值在不同模型/语料上
+    # 都要重标，而"与最高分差多少"这个口径能跟着本批分数自动平移。
+    # 0 = 关闭（只用绝对下限）。
+    #   例（margin=3.0）：最高分 -1.4 → 有效门槛 -4.4，-8.7 的陪跑片段被丢；
+    #   最高分 +4.3 → 有效门槛 +1.3，只剩真正同级的片段。
+    # 注意它**不会**放宽绝对下限：最高分都低于 rerank_min_score 时整批仍为
+    # 空（拒答），这是有意的——"相对最好"不等于"够格回答"。
+    rerank_relative_margin: float = 0.0
 
     # ---------- LLM ----------
     # 必填：端点与模型名都属于「后端相关」的值，无默认值
@@ -506,10 +520,11 @@ class Settings(BaseSettings):
             )
         if self.rerank_enabled and self.rerank_top_n <= 0:
             problems.append(f"RERANK_TOP_N 必须为正整数 — 当前 {self.rerank_top_n}")
-        if self.rerank_min_top_score < 0:
+        if self.rerank_min_top_score is not None and not math.isfinite(
+            self.rerank_min_top_score
+        ):
             problems.append(
-                f"RERANK_MIN_TOP_SCORE 不能为负 — 当前 {self.rerank_min_top_score}"
-                "（0 表示关闭该闸门；负阈值等于永远不触发，不如写 0 更诚实）"
+                f"RERANK_MIN_TOP_SCORE 必须是有限数 — 当前 {self.rerank_min_top_score}"
             )
         if not 0.0 <= self.min_similarity <= 1.0:
             problems.append(f"MIN_SIMILARITY 应落在 [0,1] — 当前 {self.min_similarity}")
@@ -585,6 +600,11 @@ class Settings(BaseSettings):
             problems.append(
                 f"HYBRID_BM25_MIN_SCORE 不能为负 — 当前 {self.hybrid_bm25_min_score}"
                 "（BM25 分非负，负阈值等于不设限）"
+            )
+        if self.rerank_relative_margin < 0:
+            problems.append(
+                f"RERANK_RELATIVE_MARGIN 不能为负 — 当前 {self.rerank_relative_margin}"
+                "（负值等于把门槛抬到最高分之上，会把整批判空；0 = 关闭）"
             )
         if not 0.0 <= self.hybrid_near_dupe_ratio <= 1.0:
             problems.append(

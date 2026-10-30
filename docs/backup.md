@@ -159,7 +159,7 @@ $script = "$root\scripts\backup.py"
 Register-ScheduledTask -TaskName "rag-backup" `
   -Trigger (New-ScheduledTaskTrigger -Daily -At 02:30) `
   -Action  (New-ScheduledTaskAction -Execute $py `
-            -Argument "$script backup --out H:\backups\rag --keep 14")
+            -Argument "$script backup --out <backup-dir>\rag --keep 14")
 ```
 
 （`--out` 指向**另一块盘**。默认的 `data/backups` 与原数据同盘，盘坏了一起没。）

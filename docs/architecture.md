@@ -145,10 +145,10 @@ Milvus 报错时给的是字节数（`length: 90000, max length: 65535`），实
 ### 5.2 向量模型：本地 BGE 权重（FlagEmbedding）
 
 - 用 **FlagEmbedding**（BAAI 官方推理库，BGE 的「主场」）直接加载本地权重目录
-  （如 `H:\models\bge-large-zh-v1.5`），不走 Ollama：Ollama 里的 bge 通常是量化版，
+  （如 `<models-dir>\bge-large-zh-v1.5`），不走 Ollama：Ollama 里的 bge 通常是量化版，
   且 manifest 目录不是可加载的权重目录。
   它直接基于 transformers 的 `AutoModel`/`AutoTokenizer`，**不经过 sentence-transformers**。
-- 本机实测（`H:\models\bge-large-zh-v1.5`，FlagEmbedding 1.4.2，CPU）：结构为 BERT + CLS pooling，
+- 本机实测（`<models-dir>\bge-large-zh-v1.5`，FlagEmbedding 1.4.2，CPU）：结构为 BERT + CLS pooling，
   输出 **1024 维**；`normalize_embeddings=True` 后 L2 范数 = 1.0；
   「哪个是向量数据库？」对 Milvus 段落余弦 **0.591** / FAISS 段落 **0.463** / 无关的食堂段落 **0.032**
   （排序正确）；两次编码结果逐位一致。
@@ -162,7 +162,7 @@ Milvus 报错时给的是字节数（`length: 90000, max length: 65535`），实
   必须按设备显式传入；本项目在适配器里按设备自动决定并在加载后检查权重 dtype 兜底，
   而不是指望调用方记得改。
 - **目录名会决定加载方式**：`FlagAutoModel` 靠**目录名**查官方映射表来选池化方式与指令模板。
-  微调后另存为自定义目录名（如 `H:\models\my-bge-ft`）会抛 `ValueError`；
+  微调后另存为自定义目录名（如 `<models-dir>\my-bge-ft`）会抛 `ValueError`；
   适配器捕获后退回 `model_class="encoder-only-base"`，行为与原来的编码器型 BGE 一致。
 - 权重已在本机时设 `HF_HUB_OFFLINE=1`，否则 transformers 会尝试连
   huggingface.co，国内会长时间卡住。

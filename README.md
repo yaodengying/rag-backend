@@ -238,8 +238,9 @@ START → retrieve → rerank ─┬─ ranked 非空 ────────�
 | # | 闸门 | 拦什么 | 默认 |
 |---|------|--------|------|
 | 1 | 入参 / 库校验 | kb_id 打错、空问题 | 开 |
-| 2 | 逐条分数闸门（`RERANK_MIN_SCORE`） | 单条负分的无关片段 | 开（0.0） |
-| 3 | 整批最高分闸门（`RERANK_MIN_TOP_SCORE`） | **整批都不对题**（"主题相邻、答案没有"） | **关**（0.0） |
+| 2 | 逐条分数闸门（`RERANK_MIN_SCORE`） | 单条分数过低的无关片段 | 开（-5.0） |
+| 2.5 | 相对落差闸门（`RERANK_RELATIVE_MARGIN`） | 跟最高分差太远的**陪跑片段**（占掉 `RERANK_TOP_N` 名额） | 开（3.0） |
+| 3 | 整批最高分闸门（`RERANK_MIN_TOP_SCORE`） | **整批都不对题**（"主题相邻、答案没有"） | 开（-4.5，粗闸门） |
 | 4 | 空上下文短路 | 零候选 → 不调模型，直接拒答 | 开 |
 | 5 | 提示词 6 条编号禁令 + 逐字拒答话术 | 改写数字、跨段拼接、无端补充 | 开 |
 | 6 | **接地性核验**（`GROUNDING_ACTION`） | 数字/型号/日期**编造**、引用序号越界 | 开（`flag`） |
@@ -328,11 +329,11 @@ rag-backend/
 | 组件 | 要求 | 本机参考 | 检查命令 |
 |---|---|---|---|
 | 操作系统 | Windows 10/11（Linux/macOS 同理，路径改一下） | Windows Server | — |
-| Python | **3.14.x**（依赖按此实测） | `E:\Python314` | `python -V` |
-| Milvus | **v3.0.2** standalone（需 etcd + minio） | `H:\Docker\milvus` | `curl http://127.0.0.1:9091/healthz` |
+| Python | **3.14.x**（依赖按此实测） | `<python-install-dir>` | `python -V` |
+| Milvus | **v3.0.2** standalone（需 etcd + minio） | `<milvus-compose-dir>` | `curl http://127.0.0.1:9091/healthz` |
 | Redis | 7.x（会话历史；不装也能跑，只是 `/conversations` 报 503） | `127.0.0.1:6379` | `redis-cli -a *** ping` |
 | Ollama | 任意 OpenAI 兼容后端 | `127.0.0.1:11434`，模型 `qwen2:7b` | `curl http://127.0.0.1:11434/api/tags` |
-| BGE 权重 | `bge-large-zh-v1.5`、`bge-reranker-base` 的**权重目录**（含 `config.json`） | `H:\models\...` | 目录里必须有 `config.json` + `pytorch_model.bin`/`.safetensors` |
+| BGE 权重 | `bge-large-zh-v1.5`、`bge-reranker-base` 的**权重目录**（含 `config.json`） | `<models-dir>\...` | 目录里必须有 `config.json` + `pytorch_model.bin`/`.safetensors` |
 
 > 权重目录**不是** Ollama 的 `manifests` 目录，也**不是** `models--xxx` 这种 HF 缓存符号链接目录。
 > FlagEmbedding 直接按目录加载，指错会在启动期被 `validate_runtime()` 拦下。
@@ -340,13 +341,13 @@ rag-backend/
 ### 4.2 起依赖服务
 
 ```powershell
-# Milvus（本机已有一套完整编排：milvus v3.0.2 + etcd + minio，数据落 H:\Docker\milvus\volumes）
-cd H:\Docker\milvus
+# Milvus（若本机已有现成编排：milvus v3.0.2 + etcd + minio，compose 文件放在 <milvus-compose-dir>）
+cd <milvus-compose-dir>
 docker compose up -d
 docker compose ps                     # 三个容器都 healthy 再继续
 
 # Redis（没有独立安装就起一个容器）
-docker run -d --name rag-redis -p 6379:6379 redis:7-alpine --requirepass redis123456
+docker run -d --name rag-redis -p 6379:6379 redis:7-alpine --requirepass <your-redis-password>
 
 # Ollama（装好的话确认模型在）
 ollama list                           # 应能看到 qwen2:7b
@@ -370,8 +371,8 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"   # 生成 AUTH_SEC
 |---|---|---|
 | `LLM_BASE_URL` | OpenAI 兼容端点 | `http://127.0.0.1:11434/v1` |
 | `LLM_MODEL` | 模型名 | `qwen2:7b` |
-| `EMBEDDING_MODEL_PATH` | BGE 向量权重**目录** | `H:\models\bge-large-zh-v1.5` |
-| `RERANK_MODEL_PATH` | 重排权重目录（`RERANK_ENABLED=true` 时必填） | `H:\models\bge-reranker-base` |
+| `EMBEDDING_MODEL_PATH` | BGE 向量权重**目录** | `<models-dir>\bge-large-zh-v1.5` |
+| `RERANK_MODEL_PATH` | 重排权重目录（`RERANK_ENABLED=true` 时必填） | `<models-dir>\bge-reranker-base` |
 | `AUTH_SECRET_KEY` | 令牌签名密钥，≥32 字符 | 上面那行命令的输出 |
 
 其余常用项（都有可用默认值，改动前建议先读 `.env.example` 里的注释）：
@@ -393,7 +394,9 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"   # 生成 AUTH_SEC
 | `HYBRID_NEAR_DUPE_RATIO` | 0.95 | 近重复合并（另存过的 PDF 等）。数字/否定词/情态词不同的片段**不会**合并；0 = 关闭。配套 `HYBRID_NEAR_DUPE_MIN_CHARS=60` 保护短公告引用 |
 | `CHAT_STREAM_RETRY_DEFAULT` | false | 想让"首轮没找到"自动多花 2~4 秒改写就设 true |
 | `GROUNDING_ACTION` | `flag` | 接地性核验的三档动作：`off` / `flag`（只标记）/ `block`（非流式下低置信换成拒答）。`block` 会推高拒答率，属产品取舍，开之前先读 [docs/anti-hallucination.md](docs/anti-hallucination.md) |
-| `RERANK_MIN_TOP_SCORE` | 0.0 | 整批最高分闸门，0 = 关。要开**必须先用 `scripts/probe_rerank_gap.py` 量分离度**，别照抄别人的数字（logits 尺度随模型/语料漂） |
+| `RERANK_MIN_SCORE` | -5.0 | 逐条 logits 下限。**不能设 0**：实测相关对分布在 [-4.5, +4.3]、无关对 [-10.2, -6.2]，0 会把"面试人姓名/年龄"这类相关片段整条丢掉。换语料/换重排模型必须重标 |
+| `RERANK_RELATIVE_MARGIN` | 3.0 | 相对落差：生效门槛 = `max(RERANK_MIN_SCORE, 本批最高分 - 本值)`。0 = 关闭（只用绝对下限）。它只收紧"跟最高分并列"的资格，**不会**放宽绝对下限（最高分不够格时整批仍为空 → 拒答） |
+| `RERANK_MIN_TOP_SCORE` | -4.5 | 整批最高分闸门，**不配置 = 关**（不是写 0：logits 可正可负，0 是合法阈值）。必须大于 `RERANK_MIN_SCORE` 才有意义。本机简历语料实测正负样本最高分**区间重叠**（负样本 -2.17 > 正样本最弱 -2.88），所以只能当粗闸门：只拦"年假/天气"这类明显不对题 |
 | `CONVERSATION_TTL_HOURS` | 168 | 会话保留 7 天，每次问答自动续期 |
 
 ### 4.4 初始化向量库
@@ -573,7 +576,7 @@ Redis 会话是 TTL 数据，都不备。完整说明（一致性原理、恢复
 | `/conversations` 报 503 | 没配 `REDIS_URL` | 填 `redis://[:密码@]127.0.0.1:6379/0` |
 | 问答 502 | 上游 LLM 挂了 / 地址错 | 看日志里的 `UpstreamError` detail；确认 `LLM_BASE_URL` |
 | 问答 504 | 模型太慢或超时太短 | 调 `LLM_TIMEOUT`，`RERANK_TOP_N` 降一点 |
-| 有资料却拒答 | 重排把候选全判负分（`RERANK_MIN_SCORE=0.0` 是硬过滤） | `/search?debug=true` 看 `rerank_score` |
+| 有资料却拒答 | 重排把候选全判低分（`RERANK_MIN_SCORE` 是硬过滤，且 logits 随语料漂） | `/search?debug=true` 看 `rerank_score`，用 `scripts/probe_rerank_gap.py` 重标 |
 | 明明有资料，回答却是空串 | 上游截断/卸载模型 | 代码已把空回复判成 `UpstreamError`，看日志 |
 | curl 传中文变乱码 | Git Bash 内联中文非 UTF-8 | 把 JSON 写文件用 `-d @payload.json`，或直接用 `/docs` |
 | `--reload` 卡在 `Reloading...`，改代码不生效 | Windows 上 `CTRL_C_EVENT` 投递不到控制台，reloader 卡在 `join()`，旧 worker 继续用旧代码服务 | 改用 `scripts/dev.py`；已卡死的先杀**进程树**，否则孤儿 worker 会继承监听套接字，新实例绑不上 8000 |
@@ -928,7 +931,7 @@ RAGAS 的正确装法（**不要** `pip install ragas`，它会把 `openai` 与 
 | `RETRIEVE_TOP_K` | 2→0.9167 / 4→0.9583 / 6,8,12,16→0.9792 | ≥6 饱和，保留 8 |
 | 两路权重 | 0.5/0.5 与 0.3/0.7 同分，0.7/0.3 略低 | 保留 0.5/0.5 |
 | `CHUNK_SIZE` | 150 与 300 指标相同但块数 ×3；**500 → MRR 0.8194** | 保留 300/50 |
-| `RERANK_TOP_N` / 阈值 | 12 组完全并列，且与"不重排"一致 | 基准测不出纯度收益；`RERANK_MIN_SCORE=0.0` 维持（2.0 会在歧义查询上误杀） |
+| `RERANK_TOP_N` / 阈值 | 12 组完全并列，且与"不重排"一致 | 基准测不出纯度收益；阈值已按新语料改为 `-5.0` + 落差 3.0（原 0.0 会把相关片段整条丢掉） |
 
 复跑：`.\.venv\Scripts\python.exe scripts\tune_retrieval.py`（四 stage：real / recall / rerank / chunk）。
 完整数据表见 [`docs/tuning.md`](docs/tuning.md)，评估口径见 [`docs/evaluation.md`](docs/evaluation.md)。
@@ -954,7 +957,7 @@ RAGAS 的正确装法（**不要** `pip install ragas`，它会把 `openai` 与 
 | # | 方向 | 现状 | 要做什么 | 触发条件 |
 |---|---|---|---|---|
 | 4 | **结构感知切分** | 按字符数切，会把几个 `##` 小节揉进一块；重排对被无关文字包围的块打负分（同一句单独成块 +0.63、混进 272 字长块 −3.99） | 按标题切（Markdown/PPTX 有天然边界），`CHUNK_SIZE` 只作上限 | 出现"两路都召回了正确片段，最终 `results` 却是空"的个案 |
-| 5 | **重排阈值策略** | `RERANK_MIN_SCORE=0.0` 是硬过滤，歧义口语查询下相关页可能拿负分被整条丢弃 | 保底策略：至少保留 top-1；或用"相对分数 + 绝对下限"双条件 | 出现"有资料却拒答"，且 `/search` 里相关页 `rerank_score` 为负 |
+| 5 | **重排阈值策略** | ~~`RERANK_MIN_SCORE=0.0` 是硬过滤~~ **已做（2026-10-28）**：改为 `-5.0` 绝对下限 + `RERANK_RELATIVE_MARGIN=3.0` 相对落差双条件；整批闸门 `RERANK_MIN_TOP_SCORE=-4.5` 作粗闸门 | 剩余：负样本补到 30+ 条后重标整批闸门（本机简历语料正负区间仍重叠） | 换语料/换重排模型时要重跑 `scripts/probe_rerank_gap.py` |
 | 6 | **检索可观测性补全** | `/search` 的 debug 只回填**存活**候选的 `rerank_score`，"被阈值丢"与"被 `rerank_k` 截断"分不开 | debug 里加 `dropped_by_threshold` / `dropped_by_rerank_k` 两个列表 | 调 `RERANK_MIN_SCORE` 时说不清影响面 |
 | 7 | **增量更新** | 重传即新文档（同内容会被去重，不新增块） | 文档指纹 + 块级 diff：只重建变化的块 | 文档会被反复小改；或库里文档数 > 几百 |
 | 8 | **评测集扩充** | 18 题（16 可答 + 2 应拒答），语料 3 篇 | 50+ 题，覆盖跨文档推理、多轮指代、表格数值、超长文档、应拒答样本到 10 题 | 要做版本间的显著性判断，而不只是"看起来更好" |

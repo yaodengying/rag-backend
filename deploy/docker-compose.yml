@@ -10,7 +10,7 @@
 #
 # 用法：
 #   1. 先确保 Milvus 已运行：
-#        cd H:\Docker\milvus && docker compose up -d
+#        cd <milvus-compose-dir> && docker compose up -d
 #   2. 再启动后端（显式指定根目录的 .env，见下方环境变量说明）：
 #        cd <项目根目录>
 #        docker compose -f deploy/docker-compose.yml --env-file .env up -d --build
@@ -20,7 +20,8 @@
 #   未设置时直接报错退出——与 Settings.validate_runtime() 的「启动期硬失败」
 #   保持一致，避免容器起来了但检索链路是废的。
 #
-# 若确实需要项目自带的 Milvus，把 H:\Docker\milvus\docker-compose.yml
+# 若确实需要项目自带的 Milvus，把现有 Milvus 的 docker-compose.yml
+# （<milvus-compose-dir>\docker-compose.yml）
 # 复制过来并把 container_name 与端口改成不冲突的值即可。
 # =============================================================================
 
@@ -60,7 +61,8 @@ services:
       # 运行时数据持久化
       - ../data:/app/data
       # 模型权重以只读方式挂入，避免复制进镜像（体积数 GB）
-      - H:/models:/models:ro
+      # 宿主机权重目录从 .env 的 MODELS_DIR 读取，不写死机器路径
+      - ${MODELS_DIR:?请在 .env 中设置 MODELS_DIR（本机模型权重所在目录）}:/models:ro
     extra_hosts:
       # Linux 下 host.docker.internal 需显式声明
       - "host.docker.internal:host-gateway"

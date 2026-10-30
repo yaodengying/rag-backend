@@ -1,7 +1,7 @@
 {
   "generated_at": "2026-10-17 18:10:44",
   "dataset": {
-    "path": "H:\\work\\rag-backend\\eval\\dataset\\qa_dataset.jsonl",
+    "path": "eval/dataset/qa_dataset.jsonl",
     "samples": 18,
     "answerable": 16,
     "refusal_cases": 2
